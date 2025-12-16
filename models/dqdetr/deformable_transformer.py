@@ -23,7 +23,8 @@ from .utils import gen_encoder_output_proposals, MLP,_get_activation_fn, gen_sin
 from .ops.modules import MSDeformAttn
 from .dn_components import prepare_for_cdn,dn_post_process
 
-from .ccm import CategoricalCounting
+# from .ccm import CategoricalCounting
+from .ccm import AdaptiveBoundaryCCM, AdaptiveBoundaryLoss
 from .cgfe import CGFE, MultiScaleFeature
 
 
@@ -121,7 +122,13 @@ class DeformableTransformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
 
         self.dynamic_query_list = dynamic_query_list
-        self.CCM = CategoricalCounting(cls_num=self.ccm_cls_num)
+        # self.CCM = CategoricalCounting(cls_num=self.ccm_cls_num)
+        self.CCM = AdaptiveBoundaryCCM(
+            feature_dim=256,
+            ccm_cls_num=4,
+            query_levels=dynamic_query_list
+        )
+
         self.CGFE = CGFE(gate_channels=256, reduction_ratio=16, num_feature_levels=self.num_feature_levels)
         self.multiscale = MultiScaleFeature(is_5_scale=True)
 
