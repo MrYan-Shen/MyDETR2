@@ -274,7 +274,13 @@ class DQDETR(nn.Module):
         args_dn = [self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale, self.training, self.num_classes, self.hidden_dim, self.label_enc]
 
         # attn_mask !!!!!!!!!!!!!!!!!!!!!
-        hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
+        # hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
+        hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, ccm_outputs, num_select = self.transformer(srcs,
+                                                                                                               masks,
+                                                                                                               poss,
+                                                                                                               targets,
+                                                                                                               args_dn)
+        # ------------------- 修复结束 -------------------
 
         # In case num object=0
         hs[0] += self.label_enc.weight[0,0]*0.0
@@ -333,7 +339,8 @@ class DQDETR(nn.Module):
                 ]
 
         out['dn_meta'] = dn_meta
-        out['pred_bbox_number'] = counting_output
+        # out['pred_bbox_number'] = counting_output
+        out.update(ccm_outputs)
         out['num_select'] = num_select
 
         return out

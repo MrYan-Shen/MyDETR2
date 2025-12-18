@@ -334,7 +334,21 @@ class DeformableTransformer(nn.Module):
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
 
-        counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
+        # counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
+        real_counts = None
+        if self.training and dn_targets is not None:
+            # 提取每个样本的目标数量
+            counts = [len(t['labels']) for t in dn_targets]
+            real_counts = torch.tensor(counts, device=memory.device)
+
+        # 2. 调用 CCM，接收字典输出
+        # 原代码: counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
+        ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
+
+        # 3. 从字典中提取后续需要的变量
+        counting_output = ccm_outputs['pred_bbox_number']  # 用于计算 num_select
+        ccm_feature = ccm_outputs['density_feature']  # 用于后续特征融合
+
         multi_ccm_feature = self.multiscale(ccm_feature)
         cgfe_out = self.CGFE(multi_ccm_feature, memory, spatial_shapes)
         memory = cgfe_out        
@@ -457,7 +471,8 @@ class DeformableTransformer(nn.Module):
 
 
 
-        return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select
+        # return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select
+        return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, ccm_outputs, num_select
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None

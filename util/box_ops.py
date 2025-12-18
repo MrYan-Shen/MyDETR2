@@ -236,6 +236,7 @@ def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     boxes2 = fix_invalid_boxes(boxes2, name="标注")
 
     # 最终断言（添加容差，避免浮点误差）
+
     assert (boxes1[:, 2] >= boxes1[:,0] + 1e-6).all(), f"仍存在x2 < x1的预测框，示例: {boxes1[boxes1[:, 2] < boxes1[:, 0]][0]}"
     assert (boxes1[:, 3] >= boxes1[:,1] + 1e-6).all(), f"仍存在y2 < y1的预测框，示例: {boxes1[boxes1[:, 3] < boxes1[:, 1]][0]}"
     assert (boxes2[:, 2] >= boxes2[:,0] + 1e-6).all(), f"仍存在x2 < x1的标注框，示例: {boxes2[boxes2[:, 2] < boxes2[:, 0]][0]}"
