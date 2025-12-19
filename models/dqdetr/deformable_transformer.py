@@ -24,7 +24,7 @@ from .ops.modules import MSDeformAttn
 from .dn_components import prepare_for_cdn,dn_post_process
 
 # from .ccm import CategoricalCounting
-from .ccm import AdaptiveBoundaryCCM, AdaptiveBoundaryLoss
+from .ccm import AdaptiveBoundaryCCM
 from .cgfe import CGFE, MultiScaleFeature
 
 
