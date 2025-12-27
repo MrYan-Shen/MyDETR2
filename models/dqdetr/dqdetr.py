@@ -274,7 +274,9 @@ class DQDETR(nn.Module):
         args_dn = [self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale, self.training, self.num_classes, self.hidden_dim, self.label_enc]
 
         # attn_mask !!!!!!!!!!!!!!!!!!!!!
+        # 原码
         # hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
+        # 第三次CCM
         hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, ccm_outputs, num_select = self.transformer(srcs,
                                                                                                                masks,
                                                                                                                poss,
@@ -339,7 +341,9 @@ class DQDETR(nn.Module):
                 ]
 
         out['dn_meta'] = dn_meta
+        # 原码
         # out['pred_bbox_number'] = counting_output
+        # 第三次CCM
         out.update(ccm_outputs)
         out['num_select'] = num_select
 

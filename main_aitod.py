@@ -8,7 +8,10 @@ import random
 import time
 from pathlib import Path
 import os, sys
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import numpy as np
+np.float = float
+np.int = int
 
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
@@ -41,11 +44,11 @@ def get_args_parser():
                              'in xxx=yyy format will be merged into config file.')
 
     # dataset parameters
-    # parser.add_argument('--dataset_file', default='aitodv2')
-    parser.add_argument('--dataset_file', default='aitod')
+    parser.add_argument('--dataset_file', default='aitodv2')
+    # parser.add_argument('--dataset_file', default='aitod')
     # parser.add_argument('--dataset_file', default='coco')
 
-    parser.add_argument('--coco_path', type=str, default='data/path/AI-TOD')
+    parser.add_argument('--coco_path', type=str, default='data/path/AITODv2')
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
     parser.add_argument('--fix_size', action='store_true')
@@ -181,8 +184,12 @@ def main(args):
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
 
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
+    # 适配aitod
+    # dataset_train = build_dataset(image_set='train', args=args)
+    # dataset_val = build_dataset(image_set='val', args=args)
+    # 适配aitodv2
+    dataset_train = build_dataset(image_set='trainval', args=args)
+    dataset_val = build_dataset(image_set='test', args=args)
 
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)

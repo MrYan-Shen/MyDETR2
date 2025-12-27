@@ -665,8 +665,8 @@ def build(image_set, args):
         PATHS = {
             "train": (root / "images/train/images", root / "annotations" / 'aitodv2_train.json'),
             "trainval": (root / "images/trainval/images", root / "annotations" / 'aitodv2_trainval.json'),
-            "val": (root / "images/val/images", root / "annotations" / 'aitod_val.json'),
-            "eval_debug": (root / "images/val/images", root / "annotations" / 'aitod_val.json'),
+            "val": (root / "images/val/images", root / "annotations" / 'aitodv2_val.json'),
+            "eval_debug": (root / "images/val/images", root / "annotations" / 'aitodv2_val.json'),
             "test": (root / "images/test/images", root / "annotations" / 'aitodv2_test.json'),
         }
     if args.dataset_file == 'coco':

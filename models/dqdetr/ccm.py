@@ -1677,9 +1677,8 @@ def make_ccm_layers(cfg, in_channels=256, d_rate=2):
 
 class AdaptiveBoundaryCCM(nn.Module):
     """
-    【终极版】真正自适应的边界分类计数模块
+    自适应的边界分类计数模块
 
-    设计理念:
     - 边界在合理范围内完全自由
     - 通过软分配保持梯度流动
     - 使用连续的损失函数(而非离散的ratio统计)
@@ -1774,7 +1773,7 @@ class AdaptiveBoundaryCCM(nn.Module):
         log_boundaries_raw = self.boundary_head(bd_feat)
 
         # 限制在合理范围
-        log_boundaries_clamped = log_boundaries_raw.clamp(min=3.0, max=7.1)
+        log_boundaries_clamped = log_boundaries_raw.clamp(min=0.0, max=7.1)
         boundaries_exp = torch.exp(log_boundaries_clamped)
 
         b1 = boundaries_exp[:, 0]
@@ -1876,7 +1875,7 @@ class AdaptiveBoundaryCCM(nn.Module):
         ref_y = (topk_y / h).clamp(min=0.01, max=0.99)
 
         ref_points = torch.stack([ref_x, ref_y], dim=-1)
-        initial_wh = torch.ones_like(ref_points) * 0.02
+        initial_wh = torch.ones_like(ref_points) * 0.05
         ref_points = torch.cat([ref_points, initial_wh], dim=-1)
 
         if actual_k < max_k:
@@ -1912,7 +1911,7 @@ class SoftFocalLoss(nn.Module):
 
 class TrueAdaptiveBoundaryLoss(nn.Module):
     """
-    【修复版 V3】修复了 Backward 标量错误
+    修复了 Backward 标量错误
     """
 
     def __init__(self,
@@ -1972,15 +1971,18 @@ class TrueAdaptiveBoundaryLoss(nn.Module):
 
         # [修复点]: 加上 .mean() 将向量转为标量
         loss_spacing = (
+                F.relu(ideal_log_spacing * 0.5 - log_spacing_01) +
                 F.relu(ideal_log_spacing * 0.5 - log_spacing_12) +
                 F.relu(ideal_log_spacing * 0.5 - log_spacing_23)
         ).mean()
 
+        phy_spacing_01 = boundaries[:, 0]
         phy_spacing_12 = boundaries[:, 1] - boundaries[:, 0]
         phy_spacing_23 = boundaries[:, 2] - boundaries[:, 1]
 
         # [修复点]: 加上 .mean() 将向量转为标量
         loss_ordering = (
+                F.relu(5.0 - phy_spacing_01) +
                 F.relu(10.0 - phy_spacing_12) +
                 F.relu(10.0 - phy_spacing_23)
         ).mean()
@@ -2772,3 +2774,1108 @@ if __name__ == '__main__':
 #             'coverage_rates': torch.stack([cdf_b1.mean(), cdf_b2.mean(), cdf_b3.mean()]),
 #             'boundary_vals': torch.exp(log_b).mean(dim=0)
 #         }
+
+# 第五次尝试（未实验）
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# import numpy as np
+#
+#
+# class Conv_GN(nn.Module):
+#     """卷积 + GroupNorm + ReLU"""
+#
+#     def __init__(self, in_channel, out_channel, kernel_size, stride=1,
+#                  padding=0, dilation=1, groups=1, relu=True, gn=True, bias=False):
+#         super(Conv_GN, self).__init__()
+#         self.conv = nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size,
+#                               stride=stride, padding=padding, dilation=dilation,
+#                               groups=groups, bias=bias)
+#         self.gn = nn.GroupNorm(32, out_channel) if gn else None
+#         self.relu = nn.ReLU(inplace=True) if relu else None
+#
+#     def forward(self, x):
+#         x = self.conv(x)
+#         if self.gn is not None:
+#             x = self.gn(x)
+#         if self.relu is not None:
+#             x = self.relu(x)
+#         return x
+#
+#
+# def make_ccm_layers(cfg, in_channels=256, d_rate=2):
+#     """构建CCM层序列(使用空洞卷积)"""
+#     layers = []
+#     for v in cfg:
+#         conv2d = Conv_GN(in_channels, v, kernel_size=3, padding=d_rate, dilation=d_rate)
+#         layers.append(conv2d)
+#         in_channels = v
+#     return nn.Sequential(*layers)
+#
+#
+# class AdaptiveBoundaryCCM(nn.Module):
+#     """
+#     【自适应查询增强版】真正自适应的边界分类计数模块
+#
+#     核心改进:
+#     1. 连续查询数量预测（替代离散档位）
+#     2. Uncertainty-aware动态调整
+#     3. 训练/推理自适应策略
+#     """
+#
+#     def __init__(self,
+#                  feature_dim=256,
+#                  ccm_cls_num=4,
+#                  query_levels=[300, 500, 900, 1500],
+#                  max_objects=1500,
+#                  min_queries=8,  # 针对微小目标，降低下限 (20 -> 8)
+#                  query_multiplier=1.8,
+#                  use_soft_assignment=True,
+#                  adaptive_query_mode='continuous'):
+#         super().__init__()
+#
+#         self.ccm_cls_num = ccm_cls_num
+#         self.query_levels = query_levels
+#         self.max_objects = max_objects
+#         self.min_queries = min_queries
+#         self.query_multiplier = query_multiplier
+#         self.use_soft_assignment = use_soft_assignment
+#         self.adaptive_query_mode = adaptive_query_mode
+#
+#         # ============ 1. 共享密度特征提取器 ============
+#         self.density_conv1 = nn.Conv2d(feature_dim, 512, kernel_size=1)
+#         self.ccm_backbone = make_ccm_layers(
+#             [512, 512, 512, 256, 256, 256],
+#             in_channels=512,
+#             d_rate=2
+#         )
+#
+#         # ============ 2. 边界预测模块 ============
+#         self.boundary_pool = nn.AdaptiveAvgPool2d(1)
+#         self.boundary_head = nn.Sequential(
+#             nn.Flatten(),
+#             nn.Linear(256, 128),
+#             nn.ReLU(inplace=True),
+#             nn.Dropout(0.1),
+#             nn.Linear(128, 3)
+#         )
+#
+#         # ============ 3. 目标数量回归 ============
+#         self.count_regressor = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(1),
+#             nn.Flatten(),
+#             nn.Linear(256, 128),
+#             nn.ReLU(inplace=True),
+#             nn.Dropout(0.1),
+#             nn.Linear(128, 1)
+#         )
+#
+#         # ============ 4. 自适应查询数量预测器 ============
+#         self.query_predictor = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(1),
+#             nn.Flatten(),
+#             nn.Linear(256, 128),
+#             nn.ReLU(inplace=True),
+#             nn.Dropout(0.1),
+#             nn.Linear(128, 64),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(64, 1)
+#         )
+#
+#         # ============ 5. Uncertainty估计器 ============
+#         self.uncertainty_head = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(1),
+#             nn.Flatten(),
+#             nn.Linear(256, 64),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(64, 1),
+#             nn.Sigmoid()
+#         )
+#
+#         # ============ 6. CCM分类头 ============
+#         self.ccm_pool = nn.AdaptiveAvgPool2d(1)
+#         self.ccm_classifier = nn.Linear(256, ccm_cls_num)
+#
+#         # ============ 7. 参考点生成 ============
+#         self.ref_point_conv = nn.Conv2d(256, 1, kernel_size=1)
+#
+#         self._init_weights()
+#
+#     def _init_weights(self):
+#         """权重初始化"""
+#         for m in self.ccm_backbone.modules():
+#             if isinstance(m, nn.Conv2d):
+#                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+#
+#         # 边界初始化
+#         nn.init.normal_(self.boundary_head[-1].weight, std=0.01)
+#         nn.init.constant_(self.boundary_head[-1].bias[0], 3.73)  # log(42)
+#         nn.init.constant_(self.boundary_head[-1].bias[1], 5.16)  # log(174)
+#         nn.init.constant_(self.boundary_head[-1].bias[2], 6.59)  # log(727)
+#
+#         nn.init.normal_(self.count_regressor[-1].weight, std=0.01)
+#         nn.init.constant_(self.count_regressor[-1].bias, 5.3)
+#
+#         # 查询预测器初始化：默认倍数为1.8
+#         nn.init.normal_(self.query_predictor[-1].weight, std=0.01)
+#         nn.init.constant_(self.query_predictor[-1].bias, 0.588)  # log(1.8)
+#
+#         # Uncertainty初始化
+#         nn.init.normal_(self.uncertainty_head[-2].weight, std=0.01)
+#         nn.init.constant_(self.uncertainty_head[-2].bias, 0.0)
+#
+#         nn.init.normal_(self.ref_point_conv.weight, std=0.01)
+#         nn.init.constant_(self.ref_point_conv.bias, -2.19)
+#
+#     def forward(self, feature_map, spatial_shapes=None, real_counts=None):
+#         if feature_map.dim() == 3:
+#             if spatial_shapes is None:
+#                 raise ValueError("spatial_shapes needed for flattened input")
+#             bs, l, c = feature_map.shape
+#             h, w = int(spatial_shapes[0][0]), int(spatial_shapes[0][1])
+#             x = feature_map[:, :h * w, :].transpose(1, 2).reshape(bs, c, h, w)
+#             feature_map = x
+#
+#         bs, c, h, w = feature_map.shape
+#         device = feature_map.device
+#
+#         # Step 1: 特征提取
+#         x = self.density_conv1(feature_map)
+#         density_feat = self.ccm_backbone(x)
+#
+#         # Step 2: 边界预测
+#         bd_feat = self.boundary_pool(density_feat).flatten(1)
+#         log_boundaries_raw = self.boundary_head(bd_feat)
+#
+#         log_boundaries_clamped = log_boundaries_raw.clamp(min=3.0, max=7.1)
+#         boundaries_exp = torch.exp(log_boundaries_clamped)
+#
+#         b1 = boundaries_exp[:, 0]
+#         b2 = b1 + boundaries_exp[:, 1]
+#         b3 = b2 + boundaries_exp[:, 2]
+#
+#         boundaries = torch.stack([b1, b2, b3], dim=1)
+#         boundaries = boundaries.clamp(min=20.0, max=1200.0)
+#
+#         # Step 3: 数量回归
+#         raw_count = self.count_regressor(density_feat).squeeze(1)
+#         pred_count = torch.exp(raw_count).clamp(min=1.0, max=self.max_objects)
+#
+#         # Step 4: 自适应查询数量预测
+#         log_query_multiplier = self.query_predictor(density_feat).squeeze(1)
+#         query_multiplier = torch.exp(log_query_multiplier).clamp(min=1.0, max=3.0)
+#
+#         # Uncertainty估计
+#         uncertainty = self.uncertainty_head(density_feat).squeeze(1)
+#
+#         # 计算自适应查询数量
+#         if real_counts is not None:
+#             N_eval = real_counts.float().clamp(min=1.0)
+#         else:
+#             N_eval = pred_count
+#
+#         num_queries, level_indices, soft_weights = self._compute_adaptive_queries(
+#             N_eval, boundaries, query_multiplier, uncertainty
+#         )
+#
+#         # Step 5: CCM分类
+#         ccm_feat = self.ccm_pool(density_feat).flatten(1)
+#         pred_bbox_number = self.ccm_classifier(ccm_feat)
+#
+#         # Step 6: 参考点生成
+#         heatmap = self.ref_point_conv(density_feat)
+#         heatmap = torch.sigmoid(heatmap.clamp(min=-10.0, max=10.0))
+#         reference_points = self._generate_reference_points(heatmap, h, w, device, num_queries)
+#
+#         outputs = {
+#             'pred_boundaries': boundaries,
+#             'log_boundaries_raw': log_boundaries_raw,
+#             'predicted_count': pred_count,
+#             'raw_count': raw_count,
+#             'num_queries': num_queries,
+#             'query_multiplier': query_multiplier,
+#             'uncertainty': uncertainty,
+#             'pred_bbox_number': pred_bbox_number,
+#             'reference_points': reference_points,
+#             'density_map': heatmap,
+#             'density_feature': density_feat,
+#             'level_indices': level_indices,
+#             'soft_weights': soft_weights
+#         }
+#         return outputs
+#
+#     def _compute_adaptive_queries(self, N_eval, boundaries, query_multiplier, uncertainty):
+#         """计算自适应查询数量"""
+#         device = N_eval.device
+#         bs = N_eval.shape[0]
+#
+#         if self.adaptive_query_mode == 'continuous':
+#             base_queries = N_eval * query_multiplier
+#             # 乘法部分：在大目标场景下（如1000个），减少不必要的膨胀，提高整体减量比
+#             mult_bonus = 1.0 + uncertainty * 0.1
+#             # 加法部分：在微小目标场景下（如3个），防止 +5 导致冗余度爆炸
+#             add_bonus = uncertainty * 3.0
+#             # 混合计算
+#             num_queries_float = base_queries * mult_bonus + add_bonus
+#
+#             # [修改点3]: 最后的 Clamp，确保不低于 min_queries
+#             num_queries_float = num_queries_float.clamp(
+#                 min=float(self.min_queries),
+#                 max=float(self.max_objects)
+#             )
+#
+#             num_queries = num_queries_float.round().long()
+#             level_indices = self._soft_discretize(num_queries_float)
+#             # soft_weights = self._compute_soft_weights(N_eval, boundaries) if self.training else None
+#             soft_weights = None
+#
+#         elif self.adaptive_query_mode == 'discrete':
+#             if self.use_soft_assignment and self.training:
+#                 soft_weights = self._compute_soft_weights(N_eval, boundaries)
+#                 adjusted_levels = [
+#                     int(level * query_multiplier.mean().item())
+#                     for level in self.query_levels
+#                 ]
+#                 query_levels_tensor = torch.tensor(adjusted_levels, dtype=torch.float32, device=device)
+#                 num_queries_float = (soft_weights * query_levels_tensor).sum(dim=1)
+#                 num_queries = num_queries_float.long()
+#                 level_indices = soft_weights.argmax(dim=1)
+#             else:
+#                 level_indices = self._assign_query_levels(N_eval, boundaries)
+#                 query_levels_tensor = torch.tensor(self.query_levels, device=device)
+#                 num_queries = query_levels_tensor[level_indices]
+#                 soft_weights = None
+#
+#         else:  # hybrid
+#             continuous_queries = (N_eval * query_multiplier).clamp(
+#                 min=self.min_queries, max=self.max_objects
+#             )
+#             level_indices = self._assign_query_levels(N_eval, boundaries)
+#             query_levels_tensor = torch.tensor(self.query_levels, device=device)
+#             discrete_queries = query_levels_tensor[level_indices].float()
+#             num_queries_float = uncertainty * continuous_queries + (1 - uncertainty) * discrete_queries
+#             num_queries = num_queries_float.long()
+#             soft_weights = self._compute_soft_weights(N_eval, boundaries) if self.training else None
+#
+#         return num_queries, level_indices, soft_weights
+#
+#     def _soft_discretize(self, continuous_values):
+#         """将连续值软离散化"""
+#         device = continuous_values.device
+#         levels = torch.tensor(self.query_levels, dtype=torch.float32, device=device)
+#         distances = torch.abs(continuous_values.unsqueeze(1) - levels)
+#         indices = distances.argmin(dim=1)
+#         return indices
+#
+#     def _compute_soft_weights(self, N_eval, boundaries):
+#         """软分配"""
+#         temperature = 50.0
+#         b = boundaries
+#         center0 = b[:, 0] / 2
+#         center1 = (b[:, 0] + b[:, 1]) / 2
+#         center2 = (b[:, 1] + b[:, 2]) / 2
+#         center3 = b[:, 2] + 200
+#
+#         centers = torch.stack([center0, center1, center2, center3], dim=1)
+#         N_eval_expanded = N_eval.unsqueeze(1)
+#         distances = -torch.abs(N_eval_expanded - centers)
+#         soft_weights = F.softmax(distances / temperature, dim=1)
+#         return soft_weights
+#
+#     def _assign_query_levels(self, N_eval, boundaries):
+#         """硬分配"""
+#         bs = N_eval.shape[0]
+#         device = N_eval.device
+#         level_indices = torch.zeros(bs, dtype=torch.long, device=device)
+#         b1, b2, b3 = boundaries[:, 0], boundaries[:, 1], boundaries[:, 2]
+#         level_indices[(N_eval >= b1) & (N_eval < b2)] = 1
+#         level_indices[(N_eval >= b2) & (N_eval < b3)] = 2
+#         level_indices[N_eval >= b3] = 3
+#         return level_indices
+#
+#     def _generate_reference_points(self, heatmap, h, w, device, num_queries):
+#         """生成参考点"""
+#         bs = heatmap.shape[0]
+#         max_k = num_queries.max().item()
+#         max_k = min(max_k, h * w)
+#
+#         heatmap_flat = heatmap.flatten(2).squeeze(1)
+#         actual_k = min(h * w, max_k)
+#
+#         _, topk_ind = torch.topk(heatmap_flat, actual_k, dim=1)
+#
+#         topk_y = (topk_ind // w).float() + 0.5
+#         topk_x = (topk_ind % w).float() + 0.5
+#
+#         ref_x = (topk_x / w).clamp(min=0.01, max=0.99)
+#         ref_y = (topk_y / h).clamp(min=0.01, max=0.99)
+#
+#         ref_points = torch.stack([ref_x, ref_y], dim=-1)
+#         initial_wh = torch.ones_like(ref_points) * 0.02
+#         ref_points = torch.cat([ref_points, initial_wh], dim=-1)
+#
+#         if actual_k < max_k:
+#             pad = torch.zeros(bs, max_k - actual_k, 4, device=device)
+#             ref_points = torch.cat([ref_points, pad], dim=1)
+#
+#         return ref_points
+#
+#
+# class SoftFocalLoss(nn.Module):
+#     """软标签Focal Loss"""
+#
+#     def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+#         super(SoftFocalLoss, self).__init__()
+#         self.alpha = alpha
+#         self.gamma = gamma
+#         self.reduction = reduction
+#
+#     def forward(self, logits, targets):
+#         probs = torch.softmax(logits, dim=1)
+#         ce_loss = -targets * torch.log(probs.clamp(min=1e-8))
+#         weight = (1 - probs).pow(self.gamma)
+#         loss = self.alpha * weight * ce_loss
+#         loss = loss.sum(dim=1)
+#
+#         if self.reduction == 'mean':
+#             return loss.mean()
+#         elif self.reduction == 'sum':
+#             return loss.sum()
+#         else:
+#             return loss
+#
+#
+# class AdaptiveQueryLoss(nn.Module):
+#     """增强版损失 - 修复spacing计算"""
+#
+#     def __init__(self,
+#                  coverage_weight=5.0,
+#                  spacing_weight=2.0,
+#                  count_weight=1.0,
+#                  interval_weight=2.0,
+#                  ccm_weight=0.2,
+#                  query_weight=2.0,  # 进一步提高
+#                  uncertainty_weight=0.2):
+#         super().__init__()
+#         self.coverage_weight = coverage_weight
+#         self.spacing_weight = spacing_weight
+#         self.count_weight = count_weight
+#         self.interval_weight = interval_weight
+#         self.ccm_weight = ccm_weight
+#         self.query_weight = query_weight
+#         self.uncertainty_weight = uncertainty_weight
+#
+#         self.focal_loss = SoftFocalLoss(alpha=0.25, gamma=2.0)
+#         self.ce_loss = nn.CrossEntropyLoss()
+#         self.smooth_l1 = nn.SmoothL1Loss()
+#
+#     def forward(self, outputs, targets):
+#         device = outputs['pred_boundaries'].device
+#         real_counts = targets['real_counts'].to(device)
+#         boundaries = outputs['pred_boundaries']
+#         bs = boundaries.shape[0]
+#
+#         # ========== 1. 覆盖率损失 ==========
+#         c = real_counts.float()
+#         temperature = 50.0
+#
+#         cdf_b1 = torch.sigmoid((boundaries[:, 0] - c) / temperature)
+#         cdf_b2 = torch.sigmoid((boundaries[:, 1] - c) / temperature)
+#         cdf_b3 = torch.sigmoid((boundaries[:, 2] - c) / temperature)
+#
+#         loss_coverage = (
+#                 (cdf_b1.mean() - 0.25) ** 2 +
+#                 (cdf_b2.mean() - 0.50) ** 2 +
+#                 (cdf_b3.mean() - 0.75) ** 2
+#         )
+#
+#         # ========== 2. 边界间距损失（修复版）==========
+#         log_b = torch.log(boundaries.clamp(min=1.0))
+#
+#         log_spacing_01 = log_b[:, 0] - torch.log(torch.tensor(1.0, device=device))  # log(b1) - log(1)
+#         log_spacing_12 = log_b[:, 1] - log_b[:, 0]
+#         log_spacing_23 = log_b[:, 2] - log_b[:, 1]
+#
+#         with torch.no_grad():
+#             max_log = torch.log(real_counts.float().max().clamp(min=1.0))
+#             min_log = torch.log(real_counts.float().min().clamp(min=1.0))
+#             ideal_log_spacing = (max_log - min_log) / 4.0
+#
+#         # 只约束b1-b2和b2-b3的间距
+#         loss_spacing = (
+#                 F.relu(ideal_log_spacing * 0.5 - log_spacing_01) +
+#                 F.relu(ideal_log_spacing * 0.5 - log_spacing_12) +
+#                 F.relu(ideal_log_spacing * 0.5 - log_spacing_23)
+#         ).mean()
+#
+#         # 物理空间最小间距
+#         phy_spacing_01 = boundaries[:, 0]  # b1 - 0
+#         phy_spacing_12 = boundaries[:, 1] - boundaries[:, 0]
+#         phy_spacing_23 = boundaries[:, 2] - boundaries[:, 1]
+#
+#         loss_ordering = (
+#                 F.relu(5.0 - phy_spacing_01) +
+#                 F.relu(10.0 - phy_spacing_12) +
+#                 F.relu(10.0 - phy_spacing_23)
+#         ).mean()
+#
+#         total_spacing_loss = loss_spacing + loss_ordering
+#
+#         # ========== 3. 软标签分类损失 ==========
+#         p0 = cdf_b1
+#         p1 = cdf_b2 - cdf_b1
+#         p2 = cdf_b3 - cdf_b2
+#         p3 = 1.0 - cdf_b3
+#
+#         soft_targets = torch.stack([p0, p1, p2, p3], dim=1).clamp(min=1e-6)
+#         soft_targets = soft_targets / soft_targets.sum(dim=1, keepdim=True)
+#         loss_interval = self.focal_loss(outputs['pred_bbox_number'], soft_targets)
+#
+#         # ========== 4. 数量回归损失 ==========
+#         loss_count = self.smooth_l1(
+#             outputs['raw_count'],
+#             torch.log(real_counts.float().clamp(min=1.0))
+#         )
+#
+#         fixed_bounds = torch.tensor([35.0, 150.0, 450.0], device=device)
+#         fixed_labels = self._compute_fixed_labels(real_counts, fixed_bounds)
+#         loss_ccm = self.ce_loss(outputs['pred_bbox_number'], fixed_labels)
+#
+#         # ========== 5. 自适应查询损失（改进版）==========
+#         pred_count = outputs['predicted_count']
+#         query_multiplier = outputs['query_multiplier']
+#
+#         # 分段理想倍数
+#         c_normalized = (c - 150.0) / 150.0
+#         ideal_multiplier = 1.8 - 0.3 * torch.tanh(c_normalized)
+#         small_target_mask = (c < 50).float()
+#         ideal_multiplier = ideal_multiplier + small_target_mask * 0.3
+#
+#         loss_query = F.smooth_l1_loss(query_multiplier, ideal_multiplier.detach())
+#
+#         # ========== 6. Uncertainty校准损失 ==========
+#         uncertainty = outputs['uncertainty']
+#         count_error = torch.abs(pred_count - c) / c.clamp(min=1.0)
+#         target_uncertainty = torch.sigmoid(count_error * 5 - 2.5)
+#         loss_uncertainty = F.mse_loss(uncertainty, target_uncertainty)
+#
+#         # ========== 总损失 ==========
+#         total_loss = (
+#                 self.coverage_weight * loss_coverage +
+#                 self.spacing_weight * total_spacing_loss +
+#                 self.count_weight * loss_count +
+#                 self.interval_weight * loss_interval +
+#                 self.ccm_weight * loss_ccm +
+#                 self.query_weight * loss_query +
+#                 self.uncertainty_weight * loss_uncertainty
+#         )
+#
+#         # 统计信息
+#         with torch.no_grad():
+#             hard_labels = []
+#             hard_labels.append((c < boundaries[:, 0]).long())
+#             hard_labels.append(((c >= boundaries[:, 0]) & (c < boundaries[:, 1])).long())
+#             hard_labels.append(((c >= boundaries[:, 1]) & (c < boundaries[:, 2])).long())
+#             hard_labels.append((c >= boundaries[:, 2]).long())
+#             interval_counts = torch.stack(hard_labels, dim=1).float()
+#             interval_ratios = interval_counts.sum(dim=0) / bs
+#
+#             coverage_rates = torch.stack([cdf_b1.mean(), cdf_b2.mean(), cdf_b3.mean()])
+#
+#             num_queries = outputs['num_queries'].float()
+#             query_efficiency = c / num_queries.clamp(min=1.0)
+#
+#         return {
+#             'loss_coverage': loss_coverage,
+#             'loss_spacing': total_spacing_loss,
+#             'loss_count': loss_count,
+#             'loss_interval': loss_interval,
+#             'loss_ccm': loss_ccm,
+#             'loss_query': loss_query,
+#             'loss_uncertainty': loss_uncertainty,
+#             'total_adaptive_loss': total_loss,
+#             'interval_ratios': interval_ratios,
+#             'coverage_rates': coverage_rates,
+#             'boundary_spacings': torch.tensor([phy_spacing_12.mean(), phy_spacing_23.mean()]),
+#             'ideal_spacing': ideal_log_spacing,
+#             'query_efficiency': query_efficiency.mean(),
+#             'avg_uncertainty': uncertainty.mean()
+#         }
+#
+#     def _compute_fixed_labels(self, real_counts, fixed_boundaries):
+#         bs = real_counts.shape[0]
+#         labels = torch.zeros(bs, dtype=torch.long, device=real_counts.device)
+#         b1, b2, b3 = fixed_boundaries[0], fixed_boundaries[1], fixed_boundaries[2]
+#         labels[(real_counts >= b1) & (real_counts < b2)] = 1
+#         labels[(real_counts >= b2) & (real_counts < b3)] = 2
+#         labels[real_counts >= b3] = 3
+#         return labels
+#
+#
+# # ============ 测试代码 ============
+# if __name__ == '__main__':
+#     print("=" * 70)
+#     print("测试：自适应查询数量CCM - 完整修复版")
+#     print("=" * 70)
+#
+#     torch.manual_seed(42)
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#
+#     # 只测试continuous模式（最重要的）
+#     print(f"\n{'=' * 70}")
+#     print(f"模式: CONTINUOUS (完整测试)")
+#     print(f"{'=' * 70}")
+#
+#     model = AdaptiveBoundaryCCM(
+#         feature_dim=256,
+#         ccm_cls_num=4,
+#         use_soft_assignment=True,
+#         adaptive_query_mode='continuous',
+#         min_queries=8,
+#         query_multiplier=1.8
+#     ).to(device)
+#
+#     criterion = AdaptiveQueryLoss(
+#         coverage_weight=3.0,
+#         spacing_weight=2.0,
+#         count_weight=1.0,
+#         interval_weight=2.0,
+#         ccm_weight=0.2,
+#         query_weight=2.0,  # 提高到2.0
+#         uncertainty_weight=0.2
+#     ).to(device)
+#
+#     # 构造长尾分布数据
+#     bs = 8
+#     feature_map = torch.randn(bs, 256, 32, 32).to(device)
+#     real_counts = torch.tensor([3, 12, 45, 120, 280, 450, 850, 1400]).to(device)
+#
+#     print(f"\n数据分布:")
+#     print(f"真实计数: {real_counts.cpu().numpy()}")
+#     print(f"范围: [{real_counts.min()}, {real_counts.max()}]")
+#     print(f"微小目标比例: {(real_counts < 50).sum().item() / bs * 100:.1f}%")
+#
+#     # 显示理想倍数
+#     c = real_counts.float()
+#     c_normalized = (c - 150.0) / 150.0
+#     ideal_mult = 1.8 - 0.3 * torch.tanh(c_normalized)
+#     small_mask = (c < 50).float()
+#     ideal_mult = ideal_mult + small_mask * 0.3
+#
+#     print(f"\n理想查询配置:")
+#     print(f"{'目标数':<8} {'理想倍数':<12} {'应分配查询':<12}")
+#     print("-" * 32)
+#     for i, cnt in enumerate(real_counts):
+#         ideal_queries = int(cnt * ideal_mult[i])
+#         print(f"{cnt.item():<8} {ideal_mult[i].item():<12.2f} {ideal_queries:<12}")
+#
+#     # 初始状态
+#     model.train()
+#     with torch.no_grad():
+#         outputs = model(feature_map, real_counts=real_counts)
+#         print(f"\n初始状态:")
+#         print(f"查询数量: {outputs['num_queries'].cpu().numpy()}")
+#         print(f"查询倍数: {outputs['query_multiplier'].detach().cpu().numpy()}")
+#         efficiency = real_counts.float() / outputs['num_queries'].float()
+#         print(f"查询效率: {efficiency.mean():.3f}")
+#
+#     # 训练
+#     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+#
+#     print(f"\n开始训练...")
+#     print("-" * 70)
+#
+#     for epoch in range(50):
+#         optimizer.zero_grad()
+#         outputs = model(feature_map, real_counts=real_counts)
+#         targets = {'real_counts': real_counts}
+#         losses = criterion(outputs, targets)
+#
+#         losses['total_adaptive_loss'].backward()
+#         optimizer.step()
+#
+#         if epoch % 10 == 0 or epoch == 49:
+#             queries = outputs['num_queries'].detach().cpu().numpy()
+#             multiplier = outputs['query_multiplier'].detach().cpu().numpy()
+#             uncertainty = outputs['uncertainty'].detach().cpu().numpy()
+#             efficiency = losses['query_efficiency'].item()
+#
+#             # 计算理想倍数
+#             c = real_counts.float()
+#             c_normalized = (c - 150.0) / 150.0
+#             ideal_mult = 1.8 - 0.3 * torch.tanh(c_normalized)
+#             small_mask = (c < 50).float()
+#             ideal_mult = ideal_mult + small_mask * 0.3
+#             ideal_mult_np = ideal_mult.detach().cpu().numpy()
+#
+#             print(f"\nEpoch {epoch}:")
+#             print(f"  查询数量: {queries}")
+#             print(f"  查询倍数: {multiplier}")
+#             print(f"  理想倍数: {ideal_mult_np}")
+#             print(f"  倍数误差: {np.abs(multiplier - ideal_mult_np).mean():.4f}")
+#             print(f"  查询效率: {efficiency:.3f}")
+#             print(f"  Total Loss: {losses['total_adaptive_loss'].item():.4f}")
+#             print(f"  Query Loss: {losses['loss_query'].item():.4f}")
+#
+#     # 最终评估
+#     print(f"\n{'=' * 70}")
+#     print(f"最终结果分析:")
+#     print(f"{'=' * 70}")
+#
+#     final_queries = outputs['num_queries'].detach().cpu().numpy()
+#     final_counts = real_counts.cpu().numpy()
+#     final_multiplier = outputs['query_multiplier'].detach().cpu().numpy()
+#     final_efficiency = final_counts / final_queries
+#
+#     print(f"\n详细对比:")
+#     print(f"{'目标数':<10} {'查询数':<10} {'倍数':<10} {'理想倍数':<12} {'效率':<10} {'冗余度':<10}")
+#     print("-" * 72)
+#     for i in range(bs):
+#         redundancy = final_queries[i] / max(final_counts[i], 1)
+#         print(f"{final_counts[i]:<10} {final_queries[i]:<10} {final_multiplier[i]:<10.2f} "
+#               f"{ideal_mult_np[i]:<12.2f} {final_efficiency[i]:<10.3f} {redundancy:<10.2f}x")
+#
+#     print(f"\n统计指标:")
+#     print(f"  平均查询效率: {final_efficiency.mean():.3f}")
+#     print(f"  平均倍数误差: {np.abs(final_multiplier - ideal_mult_np).mean():.4f}")
+#     print(f"  微小目标(<50):")
+#     print(f"    - 平均查询数: {final_queries[:3].mean():.1f}")
+#     print(f"    - 平均冗余度: {(final_queries[:3] / final_counts[:3]).mean():.2f}x")
+#     print(f"  大目标(>500):")
+#     print(f"    - 平均查询数: {final_queries[5:].mean():.1f}")
+#     print(f"    - 平均冗余度: {(final_queries[5:] / final_counts[5:]).mean():.2f}x")
+#
+#     # 与固定查询对比
+#     fixed_queries = np.array([300, 300, 300, 500, 500, 900, 900, 1500])
+#     fixed_efficiency = final_counts / fixed_queries
+#
+#     print(f"\n与固定查询对比:")
+#     print(f"  自适应平均效率: {final_efficiency.mean():.3f}")
+#     print(f"  固定档位平均效率: {fixed_efficiency.mean():.3f}")
+#     improvement = (final_efficiency.mean() / fixed_efficiency.mean() - 1) * 100
+#     print(f"  效率提升: {improvement:+.1f}%")
+#
+#     total_adaptive = final_queries.sum()
+#     total_fixed = fixed_queries.sum()
+#     query_reduction = (1 - total_adaptive / total_fixed) * 100
+#     print(f"  总查询数: {int(total_adaptive)} vs {int(total_fixed)}")
+#     print(f"  查询数减少: {query_reduction:+.1f}%")
+#
+#     # 关键验证
+#     print(f"\n{'=' * 70}")
+#     print(f"关键验证指标:")
+#     print(f"{'=' * 70}")
+#
+#     mult_error_ok = np.abs(final_multiplier - ideal_mult_np).mean() < 0.15
+#     efficiency_ok = final_efficiency.mean() > 0.45
+#     small_redundancy_ok = (final_queries[:3] / final_counts[:3]).mean() < 3.0
+#     large_redundancy_ok = (final_queries[5:] / final_counts[5:]).mean() < 2.0
+#     improvement_ok = improvement > 5.0
+#     query_reduction_ok = query_reduction > 10.0
+#
+#     print(f"1. 倍数准确度: {'✅' if mult_error_ok else '❌'} "
+#           f"(误差 {np.abs(final_multiplier - ideal_mult_np).mean():.4f} < 0.15)")
+#     print(f"2. 查询效率: {'✅' if efficiency_ok else '❌'} "
+#           f"({final_efficiency.mean():.3f} > 0.45)")
+#     print(f"3. 微小目标冗余: {'✅' if small_redundancy_ok else '❌'} "
+#           f"({(final_queries[:3] / final_counts[:3]).mean():.2f}x < 3.0x)")
+#     print(f"4. 大目标冗余: {'✅' if large_redundancy_ok else '❌'} "
+#           f"({(final_queries[5:] / final_counts[5:]).mean():.2f}x < 2.0x)")
+#     print(f"5. 效率提升: {'✅' if improvement_ok else '❌'} "
+#           f"({improvement:+.1f}% > +5%)")
+#     print(f"6. 查询数减少: {'✅' if query_reduction_ok else '❌'} "
+#           f"({query_reduction:+.1f}% > +10%)")
+#
+#     all_passed = all([mult_error_ok, efficiency_ok, small_redundancy_ok,
+#                       large_redundancy_ok, improvement_ok, query_reduction_ok])
+#
+#     print(f"\n{'=' * 70}")
+#     if all_passed:
+#         print("✅ 所有验证通过！自适应查询机制工作正常！")
+#     else:
+#         print("⚠️  部分验证未通过，需要进一步调优参数")
+#     print(f"{'=' * 70}")
+#
+#     print("\n【使用建议】")
+#     print("1. 微小目标场景（<50个）:")
+#     print("   - 使用 continuous 模式")
+#     print("   - 设置 min_queries=30-50")
+#     print("   - 设置 query_weight=2.0-3.0（强约束）")
+#     print("\n2. 密集目标场景（>500个）:")
+#     print("   - 使用 hybrid 模式（兼顾稳定性）")
+#     print("   - 设置 uncertainty_weight=0.2-0.3")
+#     print("\n3. 混合场景:")
+#     print("   - 使用 continuous 模式 + uncertainty感知")
+#     print("   - 动态调整查询倍数")
+#     print("\n4. 超参数调优建议:")
+#     print("   - query_weight: 控制查询约束强度（1.5-3.0）")
+#     print("   - min_queries: 最小查询保护（30-100）")
+#     print("   - query_multiplier: 初始倍数（1.5-2.0）")
+#     print("=" * 70)
+
+# 第六次尝试（实现了边界的自适应）
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# import numpy as np
+
+
+# ==========================================
+# 基础组件
+# ==========================================
+# class Conv_GN(nn.Module):
+#     def __init__(self, in_channel, out_channel, kernel_size, stride=1,
+#                  padding=0, dilation=1, groups=1, relu=True, gn=True, bias=False):
+#         super(Conv_GN, self).__init__()
+#         self.conv = nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size,
+#                               stride=stride, padding=padding, dilation=dilation,
+#                               groups=groups, bias=bias)
+#         self.gn = nn.GroupNorm(32, out_channel) if gn else None
+#         self.relu = nn.ReLU(inplace=True) if relu else None
+#
+#     def forward(self, x):
+#         x = self.conv(x)
+#         if self.gn is not None: x = self.gn(x)
+#         if self.relu is not None: x = self.relu(x)
+#         return x
+#
+#
+# class SoftFocalLoss(nn.Module):
+#     def __init__(self, alpha=0.25, gamma=2.0):
+#         super().__init__()
+#         self.alpha = alpha
+#         self.gamma = gamma
+#
+#     def forward(self, logits, targets):
+#         # targets是软标签 [Batch, 4]
+#         probs = torch.softmax(logits, dim=1)
+#         ce_loss = -targets * torch.log(probs.clamp(min=1e-8))
+#         weight = (1 - probs).pow(self.gamma)
+#         loss = self.alpha * weight * ce_loss
+#         return loss.sum(dim=1).mean()
+#
+#
+# # ==========================================
+# # 核心模块：AdaptiveBoundaryCCM (修复版)
+# # ==========================================
+# class AdaptiveBoundaryCCM(nn.Module):
+#     def __init__(self,
+#                  feature_dim=256,
+#                  ccm_cls_num=4,
+#                  max_objects=2000,
+#                  min_queries=10,
+#                  base_multipliers=[3.0, 2.0, 1.5, 1.1]):
+#         super().__init__()
+#
+#         self.ccm_cls_num = ccm_cls_num
+#         self.max_objects = max_objects
+#         self.min_queries = min_queries
+#         self.base_multipliers = torch.tensor(base_multipliers)
+#
+#         # 特征提取
+#         self.density_conv1 = nn.Conv2d(feature_dim, 512, kernel_size=1)
+#         self.ccm_backbone = nn.Sequential(
+#             Conv_GN(512, 512, 3, padding=2, dilation=2),
+#             Conv_GN(512, 512, 3, padding=2, dilation=2),
+#             Conv_GN(512, 256, 3, padding=2, dilation=2),
+#             Conv_GN(256, 256, 3, padding=2, dilation=2)
+#         )
+#
+#         # 1. 动态边界预测
+#         self.boundary_pool = nn.AdaptiveAvgPool2d(1)
+#         self.boundary_head = nn.Sequential(
+#             nn.Flatten(),
+#             nn.Linear(256, 128), nn.ReLU(True),
+#             nn.Linear(128, 3)
+#         )
+#
+#         # 2. 数量回归
+#         self.count_regressor = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+#             nn.Linear(256, 128), nn.ReLU(True),
+#             nn.Linear(128, 1)
+#         )
+#
+#         # 3. 参考点生成
+#         self.ref_point_conv = nn.Conv2d(256, 1, kernel_size=1)
+#
+#         # 4. 自适应倍数预测 (结合 Global Density + Local Peak)
+#         # 输入维度: 256(全局) + 1(局部峰值) + 1(预测数量)
+#         self.query_predictor = nn.Sequential(
+#             nn.Linear(256 + 2, 128),
+#             nn.ReLU(True),
+#             nn.Linear(128, 64), nn.ReLU(True),
+#             nn.Linear(64, 1)
+#         )
+#
+#         # 5. CCM分类头
+#         self.ccm_pool = nn.AdaptiveAvgPool2d(1)
+#         self.ccm_classifier = nn.Linear(256, ccm_cls_num)
+#
+#         self._init_weights()
+#
+#     def _init_weights(self):
+#         # 边界初始化：exp(3.5)~33, exp(5.0)~148, exp(6.5)~665
+#         nn.init.constant_(self.boundary_head[-1].bias[0], 3.5)
+#         nn.init.constant_(self.boundary_head[-1].bias[1], 5.0)
+#         nn.init.constant_(self.boundary_head[-1].bias[2], 6.5)
+#         nn.init.normal_(self.boundary_head[-1].weight, std=0.001)
+#
+#         # 倍数初始化：log(1.5)
+#         nn.init.constant_(self.query_predictor[-1].bias, 0.4)
+#         nn.init.constant_(self.ref_point_conv.bias, -2.19)
+#
+#     def forward(self, feature_map, spatial_shapes=None, real_counts=None):
+#         # 维度处理
+#         if feature_map.dim() == 3 and spatial_shapes is not None:
+#             bs, l, c = feature_map.shape
+#             h, w = int(spatial_shapes[0][0]), int(spatial_shapes[0][1])
+#             feature_map = feature_map[:, :h * w, :].transpose(1, 2).reshape(bs, c, h, w)
+#
+#         bs, c, h, w = feature_map.shape
+#         x = self.density_conv1(feature_map)
+#         density_feat = self.ccm_backbone(x)
+#
+#         # --- 1. 动态边界 ---
+#         global_feat = self.boundary_pool(density_feat).flatten(1)
+#         log_deltas = self.boundary_head(global_feat)
+#         deltas = torch.exp(log_deltas).clamp(min=5.0)
+#
+#         b1 = deltas[:, 0]
+#         b2 = b1 + deltas[:, 1]
+#         b3 = b2 + deltas[:, 2]
+#         boundaries = torch.stack([b1, b2, b3], dim=1).clamp(max=3000.0)
+#
+#         # --- 2. Heatmap & Local Peak ---
+#         heatmap = self.ref_point_conv(density_feat)
+#         local_peak_val = heatmap.flatten(2).max(dim=2)[0]  # [BS, 1]
+#
+#         # --- 3. 数量预测 ---
+#         raw_count = self.count_regressor(density_feat).squeeze(1)
+#         pred_count = torch.exp(raw_count)
+#
+#         # --- 4. 智能倍数预测 ---
+#         query_input = torch.cat([
+#             global_feat,
+#             local_peak_val.detach(),
+#             raw_count.unsqueeze(1).detach()
+#         ], dim=1)
+#
+#         log_multiplier = self.query_predictor(query_input).squeeze(1)
+#         multiplier = torch.exp(log_multiplier).clamp(min=1.1, max=5.0)
+#
+#         # --- 5. 计算最终查询数 ---
+#         base_queries = pred_count * multiplier
+#
+#         # 策略B: 加上安全垫 (Safety Buffer)
+#         # 逻辑：对于预测出的数量，我们额外多给 10% + 固定的 5 个查询
+#         # 这可以抵消 Count Regressor 低估带来的风险
+#         safety_buffer = pred_count * 0.1 + 5.0
+#
+#         num_queries_float = base_queries + safety_buffer
+#         num_queries = num_queries_float.round().long().clamp(
+#             min=self.min_queries,
+#             max=self.max_objects
+#         )
+#
+#         # --- 6. 辅助输出 ---
+#         ccm_logits = self.ccm_classifier(global_feat)
+#         heatmap_sig = torch.sigmoid(heatmap.clamp(min=-10, max=10))
+#         ref_points = self._generate_reference_points(heatmap_sig, h, w, num_queries)
+#
+#         return {
+#             'pred_boundaries': boundaries,
+#             'predicted_count': pred_count,
+#             'raw_count': raw_count,
+#             'num_queries': num_queries,
+#             'query_multiplier': multiplier,
+#             'pred_bbox_number': ccm_logits,
+#             'reference_points': ref_points,
+#             'density_feature': density_feat
+#         }
+#
+#     def _generate_reference_points(self, heatmap, h, w, num_queries):
+#         bs = heatmap.shape[0]
+#         max_k = num_queries.max().item()
+#         heatmap_flat = heatmap.flatten(2).squeeze(1)
+#         actual_k = min(h * w, max_k)
+#         _, topk_ind = torch.topk(heatmap_flat, actual_k, dim=1)
+#         topk_y = (topk_ind // w).float() + 0.5
+#         topk_x = (topk_ind % w).float() + 0.5
+#         ref_points = torch.stack([topk_x / w, topk_y / h], dim=-1)
+#         ref_points = torch.cat([ref_points, torch.ones_like(ref_points) * 0.01], dim=-1)
+#
+#         if actual_k < max_k:
+#             pad_size = max_k - actual_k
+#             pad = torch.zeros(bs, pad_size, 4, device=heatmap.device)
+#             ref_points = torch.cat([ref_points, pad], dim=1)
+#
+#         return ref_points
+#
+#
+# # ==========================================
+# # 修复后的 Loss
+# # ==========================================
+# class AdaptiveQueryLoss(nn.Module):
+#     def __init__(self,
+#                  base_multipliers=[3.0, 2.0, 1.5, 1.25],
+#                  weights={'coverage': 5.0, 'interval': 2.0, 'count': 1.0, 'query': 2.0}):
+#         super().__init__()
+#         self.base_multipliers = torch.tensor(base_multipliers).float()
+#         self.weights = weights
+#         self.focal_loss = SoftFocalLoss()
+#         self.smooth_l1 = nn.SmoothL1Loss()
+#
+#     def forward(self, outputs, targets):
+#         real_counts = targets['real_counts'].float()
+#         boundaries = outputs['pred_boundaries']
+#         device = boundaries.device
+#         self.base_multipliers = self.base_multipliers.to(device)
+#
+#         # 1. Coverage Loss
+#         c = real_counts
+#         temp = 50.0
+#         cdf_b1 = torch.sigmoid((boundaries[:, 0] - c) / temp)
+#         cdf_b2 = torch.sigmoid((boundaries[:, 1] - c) / temp)
+#         cdf_b3 = torch.sigmoid((boundaries[:, 2] - c) / temp)
+#
+#         loss_coverage = (
+#                 (cdf_b1.mean() - 0.25).pow(2) +
+#                 (cdf_b2.mean() - 0.50).pow(2) +
+#                 (cdf_b3.mean() - 0.75).pow(2)
+#         )
+#
+#         # 2. Interval Classification
+#         p0 = cdf_b1
+#         p1 = cdf_b2 - cdf_b1
+#         p2 = cdf_b3 - cdf_b2
+#         p3 = 1.0 - cdf_b3
+#         soft_interval_weights = torch.stack([p0, p1, p2, p3], dim=1).detach()
+#
+#         # 3. 自适应倍数目标计算
+#         target_multiplier = (soft_interval_weights * self.base_multipliers).sum(dim=1)
+#
+#         # 微小目标保护机制 (<10个目标时，强制高倍数)
+#         is_tiny = (real_counts < 10).float()
+#         target_multiplier = target_multiplier * (1 - is_tiny) + 4.0 * is_tiny
+#
+#         loss_query = self.smooth_l1(outputs['query_multiplier'], target_multiplier)
+#
+#         # 4. 其他 Loss
+#         loss_interval = self.focal_loss(outputs['pred_bbox_number'], soft_interval_weights)
+#         loss_count = self.smooth_l1(outputs['raw_count'], torch.log(c.clamp(min=1.0)))
+#         loss_spacing = (F.relu(10.0 - boundaries[:, 0]) + F.relu(20.0 - (boundaries[:, 1] - boundaries[:, 0]))).mean()
+#
+#         total_loss = (
+#                 self.weights['coverage'] * loss_coverage +
+#                 self.weights['interval'] * loss_interval +
+#                 self.weights['count'] * loss_count +
+#                 self.weights['query'] * loss_query +
+#                 loss_spacing
+#         )
+#
+#         # 【关键修复】：这里为了兼容你的训练代码，键名改回 'total_adaptive_loss'
+#         return {
+#             'total_adaptive_loss': total_loss,
+#             'target_multiplier': target_multiplier,
+#             'loss_query': loss_query
+#         }
+#
+#
+# # ==========================================
+# # 测试部分 (可以直接运行)
+# # ==========================================
+# if __name__ == '__main__':
+#     print("=" * 70)
+#     print("修复版测试：真正自适应微小目标")
+#     print("=" * 70)
+#
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#
+#     # 实例化模型和损失函数
+#     model = AdaptiveBoundaryCCM().to(device)
+#     criterion = AdaptiveQueryLoss().to(device)
+#
+#     # 模拟数据：增加微小目标 (数量 < 10)
+#     real_counts = torch.tensor([5, 8, 40, 100, 200, 1000]).to(device)
+#     bs = len(real_counts)
+#     feature_map = torch.randn(bs, 256, 32, 32).to(device)
+#
+#     optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
+#
+#     print("开始测试训练循环...\n")
+#     for i in range(50):
+#         optimizer.zero_grad()
+#         outputs = model(feature_map, real_counts=real_counts)
+#         loss_dict = criterion(outputs, {'real_counts': real_counts})
+#
+#         # 这里不会再报错 Key Error
+#         loss_dict['total_adaptive_loss'].backward()
+#         optimizer.step()
+#
+#         if i % 10 == 0:
+#             print(f"Iter {i}: Loss={loss_dict['total_adaptive_loss']:.4f}")
+#
+#     print("\n" + "=" * 70)
+#     print("结果验证")
+#     print("=" * 70)
+#     model.eval()
+#     with torch.no_grad():
+#         out = model(feature_map, real_counts=real_counts)
+#         counts = real_counts.cpu().numpy()
+#         preds = out['predicted_count'].squeeze().cpu().numpy()
+#         mults = out['query_multiplier'].squeeze().cpu().numpy()
+#         queries = out['num_queries'].cpu().numpy()
+#
+#         print(f"{'真实Count':<10} {'预测Count':<10} {'倍数Multiplier':<15} {'最终Query':<10}")
+#         print("-" * 50)
+#         for j in range(bs):
+#             print(f"{counts[j]:<10} {preds[j]:<10.1f} {mults[j]:<15.2f} {queries[j]:<10}")
+#
+#     print("\n✅ 预期结果：")
+#     print("1. 真实Count=5/8时，倍数应该接近 4.0 (Safety Logic生效)，Query数约20-30")
+#     print("2. 真实Count=1000时，倍数应该接近 1.1，Query数约1100")
+
+# 原CCM
+# import torch.nn as nn
+# import torch
+# from torchvision import models
+# import torch.nn.functional as F
+#
+#
+# class CategoricalCounting(nn.Module):
+#     def __init__(self, cls_num=4):
+#         super(CategoricalCounting, self).__init__()
+#         self.ccm_cfg = [512, 512, 512, 256, 256, 256]
+#         self.in_channels = 512
+#         self.conv1 = nn.Conv2d(256, self.in_channels, kernel_size=1)
+#         self.ccm = make_layers(self.ccm_cfg, in_channels=self.in_channels, d_rate=2)
+#         self.output = nn.AdaptiveAvgPool2d(output_size=(1, 1))
+#         self.linear = nn.Linear(256, cls_num)
+#
+#     def forward(self, features, spatial_shapes=None):
+#         features = features.transpose(1, 2)
+#         bs, c, hw = features.shape
+#         h, w = spatial_shapes[0][0], spatial_shapes[0][1]
+#
+#         v_feat = features[:, :, 0:h * w].view(bs, 256, h, w)
+#         x = self.conv1(v_feat)
+#         x = self.ccm(x)
+#         out = self.output(x)
+#         out = out.squeeze(3)
+#         out = out.squeeze(2)
+#         out = self.linear(out)
+#
+#         return out, x
+#
+#
+# def make_layers(cfg, in_channels=3, batch_norm=False, d_rate=1):
+#     layers = []
+#     for v in cfg:
+#         conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=d_rate, dilation=d_rate)
+#         if batch_norm:
+#             layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+#         else:
+#             layers += [conv2d, nn.ReLU(inplace=True)]
+#         in_channels = v
+#     return nn.Sequential(*layers)
