@@ -295,7 +295,7 @@ def main(args):
 
     start_time = time.time()
     best_map_holder = BestMetricHolder(use_ema=args.use_ema)
-    
+
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         if args.distributed:

@@ -18,7 +18,7 @@ onecyclelr = False  # 是否使用OneCycle学习率调度器
 multi_step_lr = True  # 是否使用多步长学习率调度器
 lr_drop_list = [13, 23]  # 多步长调度器下，学习率下降的轮次列表
 val_epoch = [0]  # 指定在哪些轮次后进行验证
-# dataset_file='aitod_v1'
+# dataset_file='aitod_v2'
 
 # 分类阈值
 ccm_params = [10, 100, 500]

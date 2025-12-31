@@ -139,24 +139,37 @@
 #     import ipdb; ipdb.set_trace()
 
 
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+"""
+Utilities for bounding box manipulation and GIoU.
+Optimized for AITOD (Tiny Object Detection) with Numerical Stability.
+"""
 import torch
-import warnings
 from torch import Tensor
 from typing import Tuple
+import warnings
+
+# 【关键修改】提升数值保护阈值，防止FP16下溢
+# 1e-4 对应 800像素图像中的 0.08 像素，对性能无影响但能防止NaN
+EPSILON = 1e-4
+
+
 def box_cxcywh_to_xyxy(x: Tensor) -> Tensor:
     """
-    将边界框从 (cx, cy, w, h) 格式转换为 (x1, y1, x2, y2) 格式
-    cx: 中心x坐标, cy: 中心y坐标, w: 宽度, h: 高度
-    x1, y1: 左上角坐标; x2, y2: 右下角坐标
+    (cx, cy, w, h) -> (x1, y1, x2, y2)
     """
     if x.dim() == 1:
-        x = x.unsqueeze(0)  # 确保至少有一个批次维度
-    # 替换NaN为0，避免转换后坐标异常
+        x = x.unsqueeze(0)
+
+    # 1. 数据清洗：将NaN替换为0，Inf替换为1
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+
     x_c, y_c, w, h = x.unbind(-1)
-    # 确保w/h非负（避免负宽高导致无效框）
-    w = w.clamp(min=1e-6)
-    h = h.clamp(min=1e-6)
+
+    # 2. 【关键】强制限制最小宽高，防止除零或生成无效框
+    w = w.clamp(min=EPSILON)
+    h = h.clamp(min=EPSILON)
+
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
          (x_c + 0.5 * w), (y_c + 0.5 * h)]
     return torch.stack(b, dim=-1)
@@ -164,126 +177,79 @@ def box_cxcywh_to_xyxy(x: Tensor) -> Tensor:
 
 def box_xyxy_to_cxcywh(x: Tensor) -> Tensor:
     """
-    将边界框从 (x1, y1, x2, y2) 格式转换为 (cx, cy, w, h) 格式
+    (x1, y1, x2, y2) -> (cx, cy, w, h)
     """
     if x.dim() == 1:
         x = x.unsqueeze(0)
+
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+
     x1, y1, x2, y2 = x.unbind(-1)
     b = [(x1 + x2) / 2, (y1 + y2) / 2,
-         (x2 - x1).clamp(min=1e-6), (y2 - y1).clamp(min=1e-6)]
+         (x2 - x1).clamp(min=EPSILON), (y2 - y1).clamp(min=EPSILON)]
     return torch.stack(b, dim=-1)
 
 
 def box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
-    """
-    计算两个边界框集合的交并比(IoU)
-    Args:
-        boxes1: 形状为 (N, 4) 的张量, 格式为 (x1, y1, x2, y2)
-        boxes2: 形状为 (M, 4) 的张量, 格式为 (x1, y1, x2, y2)
-    Returns:
-        iou: 形状为 (N, M) 的张量, 其中 iou[i][j] 是 boxes1[i] 和 boxes2[j] 的IoU
-    """
     inter, union = _box_inter_union(boxes1, boxes2)
-    iou = inter / union.clamp(min=1e-6)  # 避免除零
+    # 使用较大的 EPSILON
+    iou = inter / union.clamp(min=EPSILON)
     return iou
 
 
 def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     """
-    计算两个边界框集合的广义交并比(Generalized IoU)
-    解决 AssertionError: 确保边界框满足 x2 >= x1 且 y2 >= y1
+    Generalized IoU with strong numerical protection.
     """
+    # 1. 预处理：修复无效框
+    boxes1 = _fix_invalid_boxes(boxes1)
+    boxes2 = _fix_invalid_boxes(boxes2)
 
-    def fix_invalid_boxes(boxes: Tensor, name: str) -> Tensor:
-        """修正无效边界框并警告"""
-        if boxes.numel() == 0:
-            return boxes  # 空张量直接返回
-
-        # 第一步：替换NaN/无穷大值（核心修复）
-        boxes = torch.nan_to_num(
-            boxes,
-            nan=0.0,  # NaN替换为0
-            posinf=1.0,  # 正无穷替换为1
-            neginf=0.0  # 负无穷替换为0
-        )
-
-        # 第二步：修正坐标顺序（x2 >= x1, y2 >= y1）
-        x1, y1, x2, y2 = boxes.unbind(dim=-1)
-        new_x1 = torch.min(x1, x2).clamp(min=0.0)  # 限制最小为0（避免负坐标）
-        new_x2 = torch.max(x1, x2).clamp(max=1.0)  # 限制最大为1（假设坐标已归一化，根据实际调整）
-        new_y1 = torch.min(y1, y2).clamp(min=0.0)
-        new_y2 = torch.max(y1, y2).clamp(max=1.0)
-
-        fixed_boxes = torch.stack([new_x1, new_y1, new_x2, new_y2], dim=-1)
-
-        # 第三步：检测仍无效的框（用于调试）
-        still_invalid = (fixed_boxes[:, 2] <= fixed_boxes[:, 0] + 1e-6) | (
-                    fixed_boxes[:, 3] <= fixed_boxes[:, 1] + 1e-6)
-        if still_invalid.any():
-            invalid_count = still_invalid.sum().item()
-            warnings.warn(
-                f"检测到 {invalid_count} 个{name}框（含NaN/异常值），已强制修正为有效框。"
-                f"修正后无效框示例: {fixed_boxes[still_invalid][0]}"
-            )
-            # 强制设置极小有效框（避免断言失败）
-            fixed_boxes[still_invalid] = torch.tensor([0.01, 0.01, 0.02, 0.02], device=fixed_boxes.device)
-
-        return fixed_boxes
-
-    # 修正预测框和标注框（双重防护）
-    boxes1 = fix_invalid_boxes(boxes1, name="预测")
-    boxes2 = fix_invalid_boxes(boxes2, name="标注")
-
-    # 最终断言（添加容差，避免浮点误差）
-
-    assert (boxes1[:, 2] >= boxes1[:,0] + 1e-6).all(), f"仍存在x2 < x1的预测框，示例: {boxes1[boxes1[:, 2] < boxes1[:, 0]][0]}"
-    assert (boxes1[:, 3] >= boxes1[:,1] + 1e-6).all(), f"仍存在y2 < y1的预测框，示例: {boxes1[boxes1[:, 3] < boxes1[:, 1]][0]}"
-    assert (boxes2[:, 2] >= boxes2[:,0] + 1e-6).all(), f"仍存在x2 < x1的标注框，示例: {boxes2[boxes2[:, 2] < boxes2[:, 0]][0]}"
-    assert (boxes2[:, 3] >= boxes2[:,1] + 1e-6).all(), f"仍存在y2 < y1的标注框，示例: {boxes2[boxes2[:, 3] < boxes2[:, 1]][0]}"
-
-    # 原有IoU计算逻辑
+    # 2. 计算基础 IoU
     inter, union = _box_inter_union(boxes1, boxes2)
-    iou = inter / union.clamp(min=1e-6)
+    iou = inter / union.clamp(min=EPSILON)
 
-    # 计算最小外接矩形面积
-    lti = torch.min(boxes1[:, None, :2], boxes2[:, :2])  # 左上角最小值 (N, M, 2)
-    rbi = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])  # 右下角最大值 (N, M, 2)
-    whi = (rbi - lti).clamp(min=0.0)  # 外接矩形宽高（确保非负）
-    area = whi[..., 0] * whi[..., 1]  # 外接矩形面积
+    # 3. 计算外接矩形
+    lti = torch.min(boxes1[:, None, :2], boxes2[:, :2])
+    rbi = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
+    whi = (rbi - lti).clamp(min=EPSILON)  # 宽高至少为 EPSILON
+    area = whi[..., 0] * whi[..., 1]
 
-    # 广义IoU = IoU - (外接矩形面积 - 并集面积) / 外接矩形面积
-    return iou - (area - union) / area.clamp(min=1e-6)
+    # 4. 计算 GIoU
+    return iou - (area - union) / area.clamp(min=EPSILON)
+
+
+def _fix_invalid_boxes(boxes: Tensor) -> Tensor:
+    """内部函数：修复非法坐标"""
+    if boxes.numel() == 0:
+        return boxes
+
+    boxes = torch.nan_to_num(boxes, nan=0.0, posinf=1.0, neginf=0.0)
+
+    # 强制 x2 > x1 + EPS, y2 > y1 + EPS
+    x1, y1, x2, y2 = boxes.unbind(dim=-1)
+    # 修正坐标顺序，并保证最小尺寸
+    new_x2 = torch.max(x1 + EPSILON, x2)
+    new_y2 = torch.max(y1 + EPSILON, y2)
+
+    return torch.stack([x1, y1, new_x2, new_y2], dim=-1)
 
 
 def _box_inter_union(boxes1: Tensor, boxes2: Tensor) -> Tuple[Tensor, Tensor]:
-    """
-    计算两个边界框集合的交集和并集面积
-    辅助函数，被 box_iou 和 generalized_box_iou 调用
-    """
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])  # (N,)
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])  # (M,)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
 
-    # 计算交集的左上角和右下角坐标
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # (N, M, 2)
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # (N, M, 2)
+    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])
+    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
 
-    # 计算交集面积（确保宽高非负）
-    wh = (rb - lt).clamp(min=0.0)  # (N, M, 2)
-    inter = wh[..., 0] * wh[..., 1]  # (N, M)
+    wh = (rb - lt).clamp(min=0.0)  # 交集宽高非负即可
+    inter = wh[..., 0] * wh[..., 1]
 
-    # 计算并集面积
-    union = area1[:, None] + area2 - inter  # (N, M)
+    union = area1[:, None] + area2 - inter
     return inter, union
 
 
 def clip_boxes_to_image(boxes: Tensor, size: Tuple[int, int]) -> Tensor:
-    """
-    将边界框裁剪到图像范围内
-    Args:
-        boxes: 形状为 (N, 4) 的张量, 格式为 (x1, y1, x2, y2)
-        size: 图像尺寸 (height, width)
-    """
     height, width = size
     boxes[:, 0] = boxes[:, 0].clamp(min=0, max=width)
     boxes[:, 1] = boxes[:, 1].clamp(min=0, max=height)
@@ -293,14 +259,6 @@ def clip_boxes_to_image(boxes: Tensor, size: Tuple[int, int]) -> Tensor:
 
 
 def remove_small_boxes(boxes: Tensor, min_size: float) -> Tensor:
-    """
-    移除面积小于 min_size 的边界框
-    Args:
-        boxes: 形状为 (N, 4) 的张量, 格式为 (x1, y1, x2, y2)
-        min_size: 最小面积阈值
-    Returns:
-        保留的边界框索引
-    """
     w = boxes[:, 2] - boxes[:, 0]
     h = boxes[:, 3] - boxes[:, 1]
     keep = (w >= min_size) & (h >= min_size)
