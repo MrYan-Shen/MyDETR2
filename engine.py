@@ -30,7 +30,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         need_tgt_for_training = False
 
     # 【新增】初始化自适应边界损失函数
-    # 这里的权重建议与 ccm.py 中保持一致或在此调整
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
         coverage_weight=20.0,
         spacing_weight=1.0,
@@ -52,58 +51,60 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         samples = samples.to(device)
 
-        # 【新增】准备自适应 Loss 需要的真实计数
-        # 统计每张图的 GT 框数量
-        real_counts = torch.stack([torch.tensor(t['labels'].shape[0], device=device) for t in targets])
+        # 【修复】准备真实计数(在targets处理前)
+        real_counts = torch.stack([
+            torch.tensor(len(t['labels']), device=device, dtype=torch.float32)
+            for t in targets
+        ])
 
-        # 原始 targets 处理
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         with torch.amp.autocast('cuda', enabled=args.amp):
             if need_tgt_for_training:
-                # 注意：确保 model forward 接受 real_counts 参数（如果 ccm 需要它来做 Query 分配）
-                # 通常 main_aitod.py 里的 model 是 DETR 包装器，它会把 extra args 传进去
                 outputs = model(samples, targets)
             else:
                 outputs = model(samples)
 
-            # 【关键修复】确保 outputs 包含 ccm_outputs
-            # 从 transformer 的输出中提取 ccm_outputs
-            if isinstance(outputs, (tuple, list)):
-                # 根据 deformable_transformer.py 的返回顺序
-                # hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, ccm_outputs, num_select
-                if len(outputs) >= 7:
-                    ccm_outputs = outputs[6]
-                else:
-                    # 如果没有 ccm_outputs，创建一个空的
-                    ccm_outputs = {}
-            else:
-                # 如果 outputs 是字典，直接获取
-                ccm_outputs = outputs.get('ccm_outputs', {})
-
-            # 1. 计算原始 DETR Loss (bbox, giou, label)
+            # 1. 计算原始DETR损失
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
-            # 2. 【核心修改】计算自适应边界 Loss
-            # 这会计算 coverage, spacing, interval 等损失，并反向传播给 boundary_head
-            adaptive_targets = {'real_counts': real_counts}
+            # 2. 【核心修复】初始化total_adaptive_loss为0
+            total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
-            # 【修复】确保 ccm_outputs 包含必要的键
-            if ccm_outputs and 'pred_boundaries' in ccm_outputs:
-                adaptive_loss_out = adaptive_criterion(ccm_outputs, adaptive_targets)
-                total_adaptive_loss = adaptive_loss_out['total_adaptive_loss']
-                losses += total_adaptive_loss
-
-                # 记录详细 Loss 以便观察
-                loss_dict['loss_coverage'] = adaptive_loss_out.get('loss_coverage', torch.tensor(0.))
-                loss_dict['loss_interval'] = adaptive_loss_out.get('loss_interval', torch.tensor(0.))
-                loss_dict['loss_count'] = adaptive_loss_out.get('loss_count', torch.tensor(0.))
-                loss_dict['ccm_loss'] = total_adaptive_loss  # 添加到 loss_dict 以便日志记录
+            # 提取ccm_outputs
+            if isinstance(outputs, dict):
+                ccm_outputs = outputs.get('ccm_outputs', {})
+            elif isinstance(outputs, (tuple, list)) and len(outputs) >= 7:
+                ccm_outputs = outputs[6]
             else:
-                # 如果没有 ccm_outputs，使用 0 损失
-                total_adaptive_loss = torch.tensor(0., device=device)
+                ccm_outputs = {}
+
+            # 只有当ccm_outputs包含边界预测时才计算损失
+            if ccm_outputs and isinstance(ccm_outputs, dict) and 'pred_boundaries' in ccm_outputs:
+                try:
+                    adaptive_targets = {'real_counts': real_counts}
+                    adaptive_loss_out = adaptive_criterion(ccm_outputs, adaptive_targets)
+                    total_adaptive_loss = adaptive_loss_out['total_adaptive_loss']
+
+                    # 累加到总损失
+                    losses = losses + total_adaptive_loss
+
+                    # 记录详细损失
+                    loss_dict['loss_coverage'] = adaptive_loss_out.get('loss_coverage', torch.tensor(0., device=device))
+                    loss_dict['loss_interval'] = adaptive_loss_out.get('loss_interval', torch.tensor(0., device=device))
+                    loss_dict['loss_count'] = adaptive_loss_out.get('loss_count', torch.tensor(0., device=device))
+                    loss_dict['ccm_loss'] = total_adaptive_loss
+                except Exception as e:
+                    print(f"[Warning] 计算自适应损失失败: {e}")
+                    # 使用0损失
+                    loss_dict['loss_coverage'] = torch.tensor(0., device=device)
+                    loss_dict['loss_interval'] = torch.tensor(0., device=device)
+                    loss_dict['loss_count'] = torch.tensor(0., device=device)
+                    loss_dict['ccm_loss'] = torch.tensor(0., device=device)
+            else:
+                # 如果没有边界预测,使用0损失
                 loss_dict['loss_coverage'] = torch.tensor(0., device=device)
                 loss_dict['loss_interval'] = torch.tensor(0., device=device)
                 loss_dict['loss_count'] = torch.tensor(0., device=device)
@@ -116,11 +117,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
 
-        # 添加 adaptive loss 到日志（如果存在）
-        if 'ccm_loss' in loss_dict_reduced_scaled:
-            losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-        else:
-            losses_reduced_scaled = sum(loss_dict_reduced_scaled.values()) + total_adaptive_loss
+        # 【修复】确保total_adaptive_loss已定义
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+        # 如果ccm_loss在loss_dict中且不为0,说明计算了自适应损失
+        if 'ccm_loss' in loss_dict_reduced and loss_dict_reduced['ccm_loss'].item() > 0:
+            # 注意：这里不需要再加total_adaptive_loss，因为已经在losses中累加过了
+            pass
 
         loss_value = losses_reduced_scaled.item()
 
@@ -134,11 +136,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             optimizer.zero_grad()
             scaler.scale(losses).backward()
 
-            # 【调试建议】如果你想再次验证梯度，可以在这里取消注释
-            # if _cnt % 100 == 0:
-            #     # 假设 CCM 在 model.module.transformer.CCM
-            #     # print(model.module.transformer.CCM.boundary_head[-1].bias.grad)
-            #     pass
+            # 【调试】验证梯度流动
+            if _cnt % 100 == 0 and args.debug:
+                if hasattr(model, 'module'):
+                    ccm_module = model.module.transformer.CCM
+                else:
+                    ccm_module = model.transformer.CCM
+
+                if hasattr(ccm_module.boundary_head[-1], 'bias') and ccm_module.boundary_head[-1].bias.grad is not None:
+                    grad_norm = ccm_module.boundary_head[-1].bias.grad.norm().item()
+                    print(f"[Debug] Epoch {epoch}, Iter {_cnt}: Boundary head gradient norm: {grad_norm:.6f}")
+                else:
+                    print(f"[Warning] Epoch {epoch}, Iter {_cnt}: Boundary head没有梯度!")
 
             if max_norm > 0:
                 scaler.unscale_(optimizer)
@@ -166,10 +175,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
         _cnt += 1
-        if args.debug:
-            if _cnt % 15 == 0:
-                print("BREAK!" * 5)
-                break
 
     if getattr(criterion, 'loss_weight_decay', False):
         criterion.loss_weight_decay(epoch=epoch)
@@ -183,7 +188,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     if getattr(criterion, 'loss_weight_decay', False):
         resstat.update({f'weight_{k}': v for k, v in criterion.weight_dict.items()})
     return resstat
-
 
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir, wo_class_error=False,

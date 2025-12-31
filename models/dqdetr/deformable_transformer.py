@@ -321,7 +321,7 @@ class DeformableTransformer(nn.Module):
         )
 
         # ========== CCM处理 ==========
-        # 【修复1】安全提取真实计数
+        # 安全提取真实计数
         real_counts = None
         if self.training and dn_targets is not None:
             try:
@@ -338,34 +338,28 @@ class DeformableTransformer(nn.Module):
                 print(f"[Warning] 提取real_counts失败: {e}")
                 real_counts = None
 
-        # 【修复2】调用CCM并确保输出完整
-        ccm_outputs = {}
-        try:
-            ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
-        except Exception as e:
-            print(f"[Error] CCM调用失败: {e}")
-            ccm_outputs = {}
+        # 移除try-except,让异常正常抛出以便调试
+        ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
 
-        # 【修复3】获取自适应查询数量（完整的错误处理）
+        # 安全获取查询数量
         num_select = self.num_queries  # 默认值
-        if ccm_outputs and isinstance(ccm_outputs, dict):
-            if 'num_queries' in ccm_outputs:
-                nq = ccm_outputs['num_queries']
-                if nq is not None:
-                    try:
-                        if isinstance(nq, torch.Tensor):
-                            num_select = int(nq.max().item()) if nq.numel() > 0 else self.num_queries
-                        else:
-                            num_select = int(nq)
-                    except Exception as e:
-                        print(f"[Warning] 解析num_queries失败: {e}, 使用默认值")
-                        num_select = self.num_queries
+        if ccm_outputs and isinstance(ccm_outputs, dict) and 'num_queries' in ccm_outputs:
+            nq = ccm_outputs['num_queries']
+            if nq is not None:
+                try:
+                    if isinstance(nq, torch.Tensor):
+                        num_select = int(nq.max().item()) if nq.numel() > 0 else self.num_queries
+                    else:
+                        num_select = int(nq)
+                except Exception as e:
+                    print(f"[Warning] 解析num_queries失败: {e}, 使用默认值")
+                    num_select = self.num_queries
 
-        # 限制num_select范围
+        # 限制范围
         max_queries = max(self.dynamic_query_list) if self.dynamic_query_list else 1500
         num_select = max(300, min(num_select, max_queries))
 
-        # 【修复4】特征融合（添加异常处理）
+        # 特征融合
         if ccm_outputs and 'density_feature' in ccm_outputs:
             try:
                 multi_ccm_feature = self.multiscale(ccm_outputs['density_feature'])

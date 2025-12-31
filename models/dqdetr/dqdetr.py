@@ -2072,8 +2072,12 @@ class DQDETR(nn.Module):
         out['dn_meta'] = dn_meta
         # 原码
         # out['pred_bbox_number'] = counting_output
-        # 第三次CCM
-        out.update(ccm_outputs)
+        # 确保ccm_outputs是字典
+        if isinstance(ccm_outputs, dict):
+            out.update(ccm_outputs)
+        else:
+            print(f"[Warning] ccm_outputs不是字典: {type(ccm_outputs)}")
+
         out['num_select'] = num_select
 
         return out
