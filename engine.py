@@ -73,13 +73,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             # 2. 【核心修复】初始化total_adaptive_loss为0
             total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
-            # 提取ccm_outputs
+            # 【修复逻辑】提取ccm_outputs
+            # 原来的代码 outputs.get('ccm_outputs') 会返回空，因为dqdetr.py中使用了 out.update(ccm_outputs)
+            # 这意味着CCM的输出（如 'pred_boundaries'）直接位于 outputs 字典的顶层
+            ccm_outputs = {}
             if isinstance(outputs, dict):
-                ccm_outputs = outputs.get('ccm_outputs', {})
+                # 检查是否存在CCM的关键key
+                if 'pred_boundaries' in outputs:
+                    ccm_outputs = outputs
+                else:
+                    # 兼容旧逻辑
+                    ccm_outputs = outputs.get('ccm_outputs', {})
             elif isinstance(outputs, (tuple, list)) and len(outputs) >= 7:
                 ccm_outputs = outputs[6]
-            else:
-                ccm_outputs = {}
 
             # 只有当ccm_outputs包含边界预测时才计算损失
             if ccm_outputs and isinstance(ccm_outputs, dict) and 'pred_boundaries' in ccm_outputs:
@@ -147,7 +153,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     grad_norm = ccm_module.boundary_head[-1].bias.grad.norm().item()
                     print(f"[Debug] Epoch {epoch}, Iter {_cnt}: Boundary head gradient norm: {grad_norm:.6f}")
                 else:
-                    print(f"[Warning] Epoch {epoch}, Iter {_cnt}: Boundary head没有梯度!")
+                    # 如果仍然没有梯度，打印更多信息辅助调试
+                    has_outputs = 'pred_boundaries' in ccm_outputs if isinstance(ccm_outputs, dict) else False
+                    loss_is_nonzero = total_adaptive_loss.item() > 0 if isinstance(total_adaptive_loss, torch.Tensor) else False
+                    print(f"[Warning] Epoch {epoch}, Iter {_cnt}: Boundary head没有梯度! "
+                          f"Has CCM output: {has_outputs}, Loss > 0: {loss_is_nonzero}")
 
             if max_norm > 0:
                 scaler.unscale_(optimizer)
