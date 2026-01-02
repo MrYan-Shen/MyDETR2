@@ -1,156 +1,15 @@
-# # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-# """
-# Utilities for bounding box manipulation and GIoU.
-# """
-# import torch, os
-# from torchvision.ops.boxes import box_area
-#
-#
-# def box_cxcywh_to_xyxy(x):
-#     x_c, y_c, w, h = x.unbind(-1)
-#     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
-#          (x_c + 0.5 * w), (y_c + 0.5 * h)]
-#     return torch.stack(b, dim=-1)
-#
-#
-# def box_xyxy_to_cxcywh(x):
-#     x0, y0, x1, y1 = x.unbind(-1)
-#     b = [(x0 + x1) / 2, (y0 + y1) / 2,
-#          (x1 - x0), (y1 - y0)]
-#     return torch.stack(b, dim=-1)
-#
-#
-# # modified from torchvision to also return the union
-# def box_iou(boxes1, boxes2):
-#     area1 = box_area(boxes1)
-#     area2 = box_area(boxes2)
-#
-#
-#     lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-#     rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-#
-#     wh = (rb - lt).clamp(min=0)  # [N,M,2]
-#     inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-#
-#     union = area1[:, None] + area2 - inter
-#
-#     iou = inter / (union + 1e-6)
-#     return iou, union
-#
-#
-# def generalized_box_iou(boxes1, boxes2):
-#     """
-#     Generalized IoU from https://giou.stanford.edu/
-#
-#     The boxes should be in [x0, y0, x1, y1] format
-#
-#     Returns a [N, M] pairwise matrix, where N = len(boxes1)
-#     and M = len(boxes2)
-#     """
-#     # degenerate boxes gives inf / nan results
-#     # so do an early check
-#     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-#     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-#
-#     iou, union = box_iou(boxes1, boxes2)
-#
-#     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-#     rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-#
-#     wh = (rb - lt).clamp(min=0)  # [N,M,2]
-#     area = wh[:, :, 0] * wh[:, :, 1]
-#
-#     return iou - (area - union) / (area + 1e-6)
-#
-#
-#
-# # modified from torchvision to also return the union
-# def box_iou_pairwise(boxes1, boxes2):
-#     area1 = box_area(boxes1)
-#     area2 = box_area(boxes2)
-#
-#     lt = torch.max(boxes1[:, :2], boxes2[:, :2])  # [N,2]
-#     rb = torch.min(boxes1[:, 2:], boxes2[:, 2:])  # [N,2]
-#
-#     wh = (rb - lt).clamp(min=0)  # [N,2]
-#     inter = wh[:, 0] * wh[:, 1]  # [N]
-#
-#     union = area1 + area2 - inter
-#
-#     iou = inter / union
-#     return iou, union
-#
-#
-# def generalized_box_iou_pairwise(boxes1, boxes2):
-#     """
-#     Generalized IoU from https://giou.stanford.edu/
-#
-#     Input:
-#         - boxes1, boxes2: N,4
-#     Output:
-#         - giou: N, 4
-#     """
-#     # degenerate boxes gives inf / nan results
-#     # so do an early check
-#     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-#     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-#     assert boxes1.shape == boxes2.shape
-#     iou, union = box_iou_pairwise(boxes1, boxes2) # N, 4
-#
-#     lt = torch.min(boxes1[:, :2], boxes2[:, :2])
-#     rb = torch.max(boxes1[:, 2:], boxes2[:, 2:])
-#
-#     wh = (rb - lt).clamp(min=0)  # [N,2]
-#     area = wh[:, 0] * wh[:, 1]
-#
-#     return iou - (area - union) / area
-#
-# def masks_to_boxes(masks):
-#     """Compute the bounding boxes around the provided masks
-#
-#     The masks should be in format [N, H, W] where N is the number of masks, (H, W) are the spatial dimensions.
-#
-#     Returns a [N, 4] tensors, with the boxes in xyxy format
-#     """
-#     if masks.numel() == 0:
-#         return torch.zeros((0, 4), device=masks.device)
-#
-#     h, w = masks.shape[-2:]
-#
-#     y = torch.arange(0, h, dtype=torch.float)
-#     x = torch.arange(0, w, dtype=torch.float)
-#     # y, x = torch.meshgrid(y, x,indexing='ij')
-#     y, x = torch.meshgrid(y, x)
-#
-#     x_mask = (masks * x.unsqueeze(0))
-#     x_max = x_mask.flatten(1).max(-1)[0]
-#     x_min = x_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
-#
-#     y_mask = (masks * y.unsqueeze(0))
-#     y_max = y_mask.flatten(1).max(-1)[0]
-#     y_min = y_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
-#
-#     return torch.stack([x_min, y_min, x_max, y_max], 1)
-#
-# if __name__ == '__main__':
-#     x = torch.rand(5, 4)
-#     y = torch.rand(3, 4)
-#     iou, union = box_iou(x, y)
-#     import ipdb; ipdb.set_trace()
-
-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
 Utilities for bounding box manipulation and GIoU.
 Optimized for AITOD (Tiny Object Detection) with Numerical Stability.
+Enhanced with CCM adaptive boundary support.
 """
 import torch
 from torch import Tensor
-from typing import Tuple
+from typing import Tuple, Optional
 import warnings
 
 # 【关键修改】提升数值保护阈值，防止FP16下溢
-# 1e-4 对应 800像素图像中的 0.08 像素，对性能无影响但能防止NaN
 EPSILON = 1e-4
 
 
@@ -263,3 +122,207 @@ def remove_small_boxes(boxes: Tensor, min_size: float) -> Tensor:
     h = boxes[:, 3] - boxes[:, 1]
     keep = (w >= min_size) & (h >= min_size)
     return keep.nonzero().squeeze(1)
+
+
+# ======================== 新增：CCM自适应边界支持函数 ========================
+
+def validate_boundary_predictions(boundaries: Tensor, log_boundaries: Tensor) -> Tensor:
+    """
+    验证CCM预测的边界是否合理
+
+    Args:
+        boundaries: (B, 3) 边界值 [b1, b2, b3]
+        log_boundaries: (B, 3) log空间边界
+
+    Returns:
+        valid_mask: (B,) bool tensor，True表示边界合理
+    """
+    # 检查1: 单调性 (b1 < b2 < b3)
+    monotonic = (boundaries[:, 0] < boundaries[:, 1]) & (boundaries[:, 1] < boundaries[:, 2])
+
+    # 检查2: 合理范围 (1 < b1 < b2 < b3 < 10000)
+    in_range = (boundaries[:, 0] > 1) & (boundaries[:, 2] < 10000)
+
+    # 检查3: 最小间隔 (相邻边界至少相差1.5倍)
+    min_ratio = 1.5
+    ratio_12 = boundaries[:, 1] / boundaries[:, 0].clamp(min=EPSILON)
+    ratio_23 = boundaries[:, 2] / boundaries[:, 1].clamp(min=EPSILON)
+    sufficient_gap = (ratio_12 > min_ratio) & (ratio_23 > min_ratio)
+
+    # 检查4: 无NaN/Inf
+    no_nan = ~(torch.isnan(boundaries).any(dim=1) | torch.isinf(boundaries).any(dim=1))
+
+    valid_mask = monotonic & in_range & sufficient_gap & no_nan
+
+    return valid_mask
+
+
+def compute_box_size_distribution(boxes: Tensor) -> dict:
+    """
+    计算边界框尺寸分布统计（用于验证边界设置）
+
+    Args:
+        boxes: (N, 4) xyxy格式的边界框
+
+    Returns:
+        dict: 包含面积统计的字典
+    """
+    if boxes.numel() == 0:
+        return {
+            'min_area': 0.0,
+            'q25_area': 0.0,
+            'median_area': 0.0,
+            'q75_area': 0.0,
+            'max_area': 0.0,
+            'mean_area': 0.0,
+            'count': 0
+        }
+
+    # 计算面积（归一化坐标，面积在[0,1]范围）
+    w = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+    h = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+    areas = (w * h).clamp(min=0)
+
+    # 转换为像素面积（假设800x800图像）
+    areas_px = areas * (800 * 800)
+
+    # 统计
+    sorted_areas = torch.sort(areas_px)[0]
+    n = len(sorted_areas)
+
+    return {
+        'min_area': sorted_areas[0].item(),
+        'q25_area': sorted_areas[n // 4].item() if n > 4 else sorted_areas[0].item(),
+        'median_area': sorted_areas[n // 2].item(),
+        'q75_area': sorted_areas[3 * n // 4].item() if n > 4 else sorted_areas[-1].item(),
+        'max_area': sorted_areas[-1].item(),
+        'mean_area': areas_px.mean().item(),
+        'count': n
+    }
+
+
+def assign_boxes_to_boundaries(boxes: Tensor, boundaries: Tensor,
+                               image_size: Tuple[int, int] = (800, 800)) -> Tensor:
+    """
+    根据边界值将边界框分配到不同区间
+
+    Args:
+        boxes: (N, 4) xyxy格式边界框（归一化坐标）
+        boundaries: (3,) 或 (B, 3) 边界值 [b1, b2, b3]
+        image_size: 图像尺寸 (H, W)
+
+    Returns:
+        assignments: (N,) 区间索引 [0, 1, 2, 3]
+    """
+    if boxes.numel() == 0:
+        return torch.zeros(0, dtype=torch.long, device=boxes.device)
+
+    # 计算像素面积
+    w = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+    h = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+    areas = (w * h).clamp(min=0)
+    areas_px = areas * (image_size[0] * image_size[1])
+
+    # 确保boundaries是1D
+    if boundaries.dim() == 2:
+        boundaries = boundaries[0]
+
+    b1, b2, b3 = boundaries
+
+    # 分配
+    assignments = torch.zeros(len(boxes), dtype=torch.long, device=boxes.device)
+    assignments[(areas_px >= b1) & (areas_px < b2)] = 1
+    assignments[(areas_px >= b2) & (areas_px < b3)] = 2
+    assignments[areas_px >= b3] = 3
+
+    return assignments
+
+
+def compute_boundary_coverage(boxes: Tensor, boundaries: Tensor,
+                              image_size: Tuple[int, int] = (800, 800)) -> Tensor:
+    """
+    计算边界的覆盖率（用于验证Coverage Loss）
+
+    Args:
+        boxes: (N, 4) 边界框
+        boundaries: (3,) 边界值
+        image_size: 图像尺寸
+
+    Returns:
+        coverage: (3,) 每个边界的覆盖率
+    """
+    if boxes.numel() == 0:
+        return torch.zeros(3, device=boxes.device)
+
+    # 计算像素面积
+    w = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+    h = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+    areas = (w * h).clamp(min=0)
+    areas_px = areas * (image_size[0] * image_size[1])
+
+    # 确保boundaries是1D
+    if boundaries.dim() == 2:
+        boundaries = boundaries[0]
+
+    b1, b2, b3 = boundaries
+
+    # 计算覆盖率
+    total = len(boxes)
+    coverage = torch.tensor([
+        (areas_px < b1).sum().float() / total,
+        (areas_px < b2).sum().float() / total,
+        (areas_px < b3).sum().float() / total
+    ], device=boxes.device)
+
+    return coverage
+
+
+# ======================== 新增：微小目标专用函数 ========================
+
+def scale_boxes_for_tiny_objects(boxes: Tensor, scale_factor: float = 1.2) -> Tensor:
+    """
+    对微小目标的边界框进行轻微放大（用于NMS前处理）
+
+    Args:
+        boxes: (N, 4) xyxy格式
+        scale_factor: 放大系数（默认1.2倍）
+
+    Returns:
+        scaled_boxes: (N, 4) 放大后的边界框
+    """
+    # 转换为cxcywh
+    cxcywh = box_xyxy_to_cxcywh(boxes)
+
+    # 放大宽高
+    cxcywh[:, 2:] *= scale_factor
+
+    # 转回xyxy
+    return box_cxcywh_to_xyxy(cxcywh)
+
+
+def filter_tiny_boxes_by_area(boxes: Tensor, scores: Tensor,
+                              min_area_px: float = 4.0,
+                              image_size: Tuple[int, int] = (800, 800)) -> Tuple[Tensor, Tensor]:
+    """
+    过滤掉过小的边界框（可能是噪声）
+
+    Args:
+        boxes: (N, 4) 归一化坐标
+        scores: (N,) 置信度
+        min_area_px: 最小像素面积
+        image_size: 图像尺寸
+
+    Returns:
+        filtered_boxes, filtered_scores
+    """
+    if boxes.numel() == 0:
+        return boxes, scores
+
+    w = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+    h = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+    areas = (w * h).clamp(min=0)
+    areas_px = areas * (image_size[0] * image_size[1])
+
+    keep = areas_px >= min_area_px
+
+    return boxes[keep], scores[keep]

@@ -329,37 +329,70 @@ class DeformableTransformer(nn.Module):
                     counts = []
                     for t in dn_targets:
                         if isinstance(t, dict) and 'labels' in t:
-                            counts.append(len(t['labels']))
+                            # 确保labels是tensor并且在正确设备上
+                            labels = t['labels']
+                            if isinstance(labels, torch.Tensor):
+                                counts.append(len(labels))
+                            else:
+                                counts.append(0)
                         else:
                             counts.append(0)
-                    if counts:
+
+                    if counts and sum(counts) > 0:  # 至少有一个目标
                         real_counts = torch.tensor(counts, device=memory.device, dtype=torch.float32)
             except Exception as e:
-                print(f"[Warning] 提取real_counts失败: {e}")
+                print(f"[Warning] CCM: 提取real_counts失败: {e}")
                 real_counts = None
 
-        # 移除try-except,让异常正常抛出以便调试
-        ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
-
-        # 安全获取查询数量
+        # 【关键修复】CCM调用时使用try-except保护
+        ccm_outputs = {}
         num_select = self.num_queries  # 默认值
-        if ccm_outputs and isinstance(ccm_outputs, dict) and 'num_queries' in ccm_outputs:
-            nq = ccm_outputs['num_queries']
-            if nq is not None:
-                try:
+
+        try:
+            ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
+
+            # 【关键修复】安全提取num_queries
+            if ccm_outputs and isinstance(ccm_outputs, dict):
+                if 'num_queries' in ccm_outputs:
+                    nq = ccm_outputs['num_queries']
                     if isinstance(nq, torch.Tensor):
+                        # 如果是batch tensor，取最大值
                         num_select = int(nq.max().item()) if nq.numel() > 0 else self.num_queries
-                    else:
+                    elif isinstance(nq, (int, float)):
                         num_select = int(nq)
-                except Exception as e:
-                    print(f"[Warning] 解析num_queries失败: {e}, 使用默认值")
-                    num_select = self.num_queries
 
-        # 限制范围
-        max_queries = max(self.dynamic_query_list) if self.dynamic_query_list else 1500
-        num_select = max(300, min(num_select, max_queries))
+                # 限制范围
+                max_queries = max(self.dynamic_query_list) if self.dynamic_query_list else 1500
+                num_select = max(300, min(num_select, max_queries))
 
-        # 特征融合
+                # 【数值稳定性】检查边界预测的合理性
+                if 'pred_boundaries' in ccm_outputs:
+                    boundaries = ccm_outputs['pred_boundaries']
+                    log_boundaries = ccm_outputs['log_boundaries']
+
+                    # 使用box_ops验证
+                    from util.box_ops import validate_boundary_predictions
+                    valid_mask = validate_boundary_predictions(boundaries, log_boundaries)
+
+                    if not valid_mask.all():
+                        print(f"[Warning] CCM: 检测到无效边界，使用默认query数量")
+                        # 可以选择使用默认值或修正
+                        num_select = self.num_queries
+
+        except Exception as e:
+            print(f"[Error] CCM处理失败: {e}")
+            # 使用默认输出
+            ccm_outputs = {
+                'pred_boundaries': torch.tensor([[20, 100, 500]], device=memory.device),
+                'log_boundaries': torch.log(torch.tensor([[20, 100, 500]], device=memory.device)),
+                'predicted_count': torch.tensor([100], device=memory.device),
+                'raw_count': torch.log(torch.tensor([100], device=memory.device)),
+                'pred_bbox_number': torch.zeros(1, self.ccm_cls_num, device=memory.device),
+                'num_queries': torch.tensor([self.num_queries], device=memory.device)
+            }
+            num_select = self.num_queries
+
+        # 【特征融合】CGFE处理
         if ccm_outputs and 'density_feature' in ccm_outputs:
             try:
                 multi_ccm_feature = self.multiscale(ccm_outputs['density_feature'])
@@ -400,7 +433,7 @@ class DeformableTransformer(nn.Module):
             enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
             enc_outputs_coord_unselected = self.enc_out_bbox_embed(output_memory) + output_proposals
 
-            # 【修复5】使用自适应topk
+            # 使用自适应topk
             topk = num_select
             topk_proposals = torch.topk(enc_outputs_class_unselected.max(-1)[0], topk, dim=1)[1]
 

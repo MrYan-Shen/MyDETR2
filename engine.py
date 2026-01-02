@@ -12,7 +12,7 @@ import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 
-# 【新增】导入自适应损失函数
+# 导入自适应损失函数
 from models.dqdetr.ccm import TrueAdaptiveBoundaryLoss
 
 print_freq = 5000
@@ -29,7 +29,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     except:
         need_tgt_for_training = False
 
-    # 【新增】初始化自适应边界损失函数
+    # 初始化自适应边界损失函数
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
         coverage_weight=20.0,
         spacing_weight=1.0,
@@ -51,11 +51,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         samples = samples.to(device)
 
-        # 【修复】准备真实计数(在targets处理前)
-        real_counts = torch.stack([
-            torch.tensor(len(t['labels']), device=device, dtype=torch.float32)
-            for t in targets
-        ])
+        # 准备真实计数（在targets处理前提取）
+        real_counts = torch.tensor(
+            [len(t['labels']) for t in targets],
+            device=device,
+            dtype=torch.float32
+        )
 
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
@@ -70,28 +71,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
-            # 2. 【核心修复】初始化total_adaptive_loss为0
+            # 2. 计算自适应边界损失
             total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
-            # 【修复逻辑】提取ccm_outputs
-            # 原来的代码 outputs.get('ccm_outputs') 会返回空，因为dqdetr.py中使用了 out.update(ccm_outputs)
-            # 这意味着CCM的输出（如 'pred_boundaries'）直接位于 outputs 字典的顶层
-            ccm_outputs = {}
-            if isinstance(outputs, dict):
-                # 检查是否存在CCM的关键key
-                if 'pred_boundaries' in outputs:
-                    ccm_outputs = outputs
-                else:
-                    # 兼容旧逻辑
-                    ccm_outputs = outputs.get('ccm_outputs', {})
-            elif isinstance(outputs, (tuple, list)) and len(outputs) >= 7:
-                ccm_outputs = outputs[6]
-
-            # 只有当ccm_outputs包含边界预测时才计算损失
-            if ccm_outputs and isinstance(ccm_outputs, dict) and 'pred_boundaries' in ccm_outputs:
+            # 检查CCM输出（outputs中直接包含CCM的key）
+            if 'pred_boundaries' in outputs:
                 try:
+                    # 构造adaptive_targets
                     adaptive_targets = {'real_counts': real_counts}
-                    adaptive_loss_out = adaptive_criterion(ccm_outputs, adaptive_targets)
+                    adaptive_loss_out = adaptive_criterion(outputs, adaptive_targets)
                     total_adaptive_loss = adaptive_loss_out['total_adaptive_loss']
 
                     # 累加到总损失
@@ -101,19 +89,32 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     loss_dict['loss_coverage'] = adaptive_loss_out.get('loss_coverage', torch.tensor(0., device=device))
                     loss_dict['loss_interval'] = adaptive_loss_out.get('loss_interval', torch.tensor(0., device=device))
                     loss_dict['loss_count'] = adaptive_loss_out.get('loss_count', torch.tensor(0., device=device))
+                    loss_dict['loss_spacing'] = adaptive_loss_out.get('loss_spacing', torch.tensor(0., device=device))
                     loss_dict['ccm_loss'] = total_adaptive_loss
+
+                    # 每100个iter记录边界值（用于监控）
+                    if _cnt % 100 == 0 and args.rank == 0:
+                        boundary_vals = adaptive_loss_out['boundary_vals'].cpu().tolist()
+                        coverage_rates = adaptive_loss_out['coverage_rates'].cpu().tolist()
+                        if logger:
+                            logger.info(
+                                f"Epoch {epoch}, Iter {_cnt}: Boundaries={boundary_vals}, Coverage={coverage_rates}")
+
                 except Exception as e:
-                    print(f"[Warning] 计算自适应损失失败: {e}")
+                    if args.rank == 0:
+                        print(f"[Warning] 计算自适应损失失败: {e}")
                     # 使用0损失
                     loss_dict['loss_coverage'] = torch.tensor(0., device=device)
                     loss_dict['loss_interval'] = torch.tensor(0., device=device)
                     loss_dict['loss_count'] = torch.tensor(0., device=device)
+                    loss_dict['loss_spacing'] = torch.tensor(0., device=device)
                     loss_dict['ccm_loss'] = torch.tensor(0., device=device)
             else:
                 # 如果没有边界预测,使用0损失
                 loss_dict['loss_coverage'] = torch.tensor(0., device=device)
                 loss_dict['loss_interval'] = torch.tensor(0., device=device)
                 loss_dict['loss_count'] = torch.tensor(0., device=device)
+                loss_dict['loss_spacing'] = torch.tensor(0., device=device)
                 loss_dict['ccm_loss'] = torch.tensor(0., device=device)
 
         # reduce losses over all GPUs for logging purposes
@@ -123,13 +124,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
 
-        # 【修复】确保total_adaptive_loss已定义
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-        # 如果ccm_loss在loss_dict中且不为0,说明计算了自适应损失
-        if 'ccm_loss' in loss_dict_reduced and loss_dict_reduced['ccm_loss'].item() > 0:
-            # 注意：这里不需要再加total_adaptive_loss，因为已经在losses中累加过了
-            pass
-
         loss_value = losses_reduced_scaled.item()
 
         if not math.isfinite(loss_value):
@@ -141,23 +136,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if args.amp:
             optimizer.zero_grad()
             scaler.scale(losses).backward()
-
-            # 【调试】验证梯度流动
-            if _cnt % 100 == 0 and args.debug:
-                if hasattr(model, 'module'):
-                    ccm_module = model.module.transformer.CCM
-                else:
-                    ccm_module = model.transformer.CCM
-
-                if hasattr(ccm_module.boundary_head[-1], 'bias') and ccm_module.boundary_head[-1].bias.grad is not None:
-                    grad_norm = ccm_module.boundary_head[-1].bias.grad.norm().item()
-                    print(f"[Debug] Epoch {epoch}, Iter {_cnt}: Boundary head gradient norm: {grad_norm:.6f}")
-                else:
-                    # 如果仍然没有梯度，打印更多信息辅助调试
-                    has_outputs = 'pred_boundaries' in ccm_outputs if isinstance(ccm_outputs, dict) else False
-                    loss_is_nonzero = total_adaptive_loss.item() > 0 if isinstance(total_adaptive_loss, torch.Tensor) else False
-                    print(f"[Warning] Epoch {epoch}, Iter {_cnt}: Boundary head没有梯度! "
-                          f"Has CCM output: {has_outputs}, Loss > 0: {loss_is_nonzero}")
 
             if max_norm > 0:
                 scaler.unscale_(optimizer)
@@ -199,6 +177,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         resstat.update({f'weight_{k}': v for k, v in criterion.weight_dict.items()})
     return resstat
 
+
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir, wo_class_error=False,
              args=None, logger=None):
@@ -234,7 +213,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         )
 
     _cnt = 0
-    output_state_dict = {}  # for debug only
+    output_state_dict = {}
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header, logger=logger):
 
         samples = samples.to(device)
@@ -262,14 +241,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         if 'class_error' in loss_dict_reduced:
             metric_logger.update(class_error=loss_dict_reduced['class_error'])
 
-        # 【修复】确保 outputs 包含 num_select
-        if isinstance(outputs, (tuple, list)):
-            if len(outputs) >= 8:
-                num_select = outputs[7]
-            else:
-                num_select = None
-        else:
-            num_select = outputs.get('num_select', None)
+        # 提取num_select（处理不同输出格式）
+        num_select = outputs.get('num_select', None)
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes, num_select)

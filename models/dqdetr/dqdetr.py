@@ -2074,11 +2074,24 @@ class DQDETR(nn.Module):
         # out['pred_bbox_number'] = counting_output
         # 确保ccm_outputs是字典
         if isinstance(ccm_outputs, dict):
-            out.update(ccm_outputs)
+            # 确保CCM输出的tensor都在正确的设备上
+            safe_ccm_outputs = {}
+            for k, v in ccm_outputs.items():
+                if isinstance(v, torch.Tensor):
+                    safe_ccm_outputs[k] = v
+                elif v is None:
+                    # 跳过None值
+                    continue
+                else:
+                    # 其他类型直接保存
+                    safe_ccm_outputs[k] = v
+
+            # 使用update而不是直接赋值，避免覆盖out中已有的key
+            for k, v in safe_ccm_outputs.items():
+                if k not in out:  # 防止覆盖重要的输出
+                    out[k] = v
         else:
             print(f"[Warning] ccm_outputs不是字典: {type(ccm_outputs)}")
-
-        out['num_select'] = num_select
 
         return out
 
