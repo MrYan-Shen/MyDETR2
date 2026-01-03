@@ -3,31 +3,27 @@
 Utilities for bounding box manipulation and GIoU.
 Optimized for AITOD (Tiny Object Detection) with Numerical Stability.
 Enhanced with CCM adaptive boundary support.
+Fixed: EPSILON adjusted for tiny object normalized areas (e.g. 4x4 pixels).
 """
 import torch
 from torch import Tensor
 from typing import Tuple, Optional
 import warnings
 
-# 【关键修改】提升数值保护阈值，防止FP16下溢
-EPSILON = 1e-4
+# 【修改1】适应微小目标：4x4像素在800x800图上约为2.5e-5，必须小于此值
+EPSILON = 1e-7
 
 
 def box_cxcywh_to_xyxy(x: Tensor) -> Tensor:
-    """
-    (cx, cy, w, h) -> (x1, y1, x2, y2)
-    """
+    """(cx, cy, w, h) -> (x1, y1, x2, y2)"""
     if x.dim() == 1:
         x = x.unsqueeze(0)
-
-    # 1. 数据清洗：将NaN替换为0，Inf替换为1
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-
     x_c, y_c, w, h = x.unbind(-1)
 
-    # 2. 【关键】强制限制最小宽高，防止除零或生成无效框
-    w = w.clamp(min=EPSILON)
-    h = h.clamp(min=EPSILON)
+    # 【修改2】限制最小宽高，防止除零。对于微小目标，1e-5 (约0.008像素) 足够安全
+    w = w.clamp(min=1e-5)
+    h = h.clamp(min=1e-5)
 
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
          (x_c + 0.5 * w), (y_c + 0.5 * h)]
@@ -35,23 +31,29 @@ def box_cxcywh_to_xyxy(x: Tensor) -> Tensor:
 
 
 def box_xyxy_to_cxcywh(x: Tensor) -> Tensor:
-    """
-    (x1, y1, x2, y2) -> (cx, cy, w, h)
-    """
+    """(x1, y1, x2, y2) -> (cx, cy, w, h)"""
     if x.dim() == 1:
         x = x.unsqueeze(0)
-
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-
     x1, y1, x2, y2 = x.unbind(-1)
     b = [(x1 + x2) / 2, (y1 + y2) / 2,
-         (x2 - x1).clamp(min=EPSILON), (y2 - y1).clamp(min=EPSILON)]
+         (x2 - x1).clamp(min=1e-5), (y2 - y1).clamp(min=1e-5)]
     return torch.stack(b, dim=-1)
 
 
 def box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
+    """
+    计算IoU，强制使用float32以保证微小目标精度
+    """
+    # 【修改3】强制转换为 float32 进行计算，防止 FP16 下溢
+    # 这对微小目标 IoU 计算至关重要
+    if boxes1.dtype == torch.float16:
+        boxes1 = boxes1.float()
+    if boxes2.dtype == torch.float16:
+        boxes2 = boxes2.float()
+
     inter, union = _box_inter_union(boxes1, boxes2)
-    # 使用较大的 EPSILON
+    # 使用较小的 EPSILON (1e-7)
     iou = inter / union.clamp(min=EPSILON)
     return iou
 
@@ -59,38 +61,47 @@ def box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
 def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     """
     Generalized IoU with strong numerical protection.
+    强制 float32 计算。
     """
+    # 保存原始 dtype 以便最后转回
+    original_dtype = boxes1.dtype
+
+    # 强制转换为 float32
+    boxes1 = boxes1.float()
+    boxes2 = boxes2.float()
+
     # 1. 预处理：修复无效框
     boxes1 = _fix_invalid_boxes(boxes1)
     boxes2 = _fix_invalid_boxes(boxes2)
 
-    # 2. 计算基础 IoU
+    # 2. 计算 IoU
     inter, union = _box_inter_union(boxes1, boxes2)
     iou = inter / union.clamp(min=EPSILON)
 
     # 3. 计算外接矩形
     lti = torch.min(boxes1[:, None, :2], boxes2[:, :2])
     rbi = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-    whi = (rbi - lti).clamp(min=EPSILON)  # 宽高至少为 EPSILON
+    whi = (rbi - lti).clamp(min=EPSILON)
     area = whi[..., 0] * whi[..., 1]
 
     # 4. 计算 GIoU
-    return iou - (area - union) / area.clamp(min=EPSILON)
+    giou = iou - (area - union) / area.clamp(min=EPSILON)
+
+    # 如果输入是 FP16，结果转回 FP16 (保持兼容性)
+    if original_dtype == torch.float16:
+        giou = giou.half()
+
+    return giou
 
 
 def _fix_invalid_boxes(boxes: Tensor) -> Tensor:
-    """内部函数：修复非法坐标"""
     if boxes.numel() == 0:
         return boxes
-
     boxes = torch.nan_to_num(boxes, nan=0.0, posinf=1.0, neginf=0.0)
-
-    # 强制 x2 > x1 + EPS, y2 > y1 + EPS
     x1, y1, x2, y2 = boxes.unbind(dim=-1)
-    # 修正坐标顺序，并保证最小尺寸
-    new_x2 = torch.max(x1 + EPSILON, x2)
-    new_y2 = torch.max(y1 + EPSILON, y2)
-
+    # 保证 x2 > x1, y2 > y1，防止退化为线或点
+    new_x2 = torch.max(x1 + 1e-5, x2)
+    new_y2 = torch.max(y1 + 1e-5, y2)
     return torch.stack([x1, y1, new_x2, new_y2], dim=-1)
 
 
@@ -101,12 +112,11 @@ def _box_inter_union(boxes1: Tensor, boxes2: Tensor) -> Tuple[Tensor, Tensor]:
     lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])
     rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
 
-    wh = (rb - lt).clamp(min=0.0)  # 交集宽高非负即可
+    wh = (rb - lt).clamp(min=0.0)
     inter = wh[..., 0] * wh[..., 1]
 
     union = area1[:, None] + area2 - inter
     return inter, union
-
 
 def clip_boxes_to_image(boxes: Tensor, size: Tuple[int, int]) -> Tensor:
     height, width = size

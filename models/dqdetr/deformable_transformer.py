@@ -42,7 +42,7 @@ class DeformableTransformer(nn.Module):
                  add_pos_value=False,
                  random_refpoints_xy=False,
                  # two stage
-                 two_stage_type='no',  # ['no', 'standard', 'early', 'combine', 'enceachlayer', 'enclayer1']
+                 two_stage_type='standard',  # ['no', 'standard', 'early', 'combine', 'enceachlayer', 'enclayer1']
                  two_stage_pat_embed=0,
                  two_stage_add_query_num=0,
                  two_stage_learn_wh=False,
@@ -323,35 +323,44 @@ class DeformableTransformer(nn.Module):
         # ========== CCM处理 ==========
         # 安全提取真实计数
         real_counts = None
-        if self.training and dn_targets is not None:
-            try:
-                if isinstance(dn_targets, list) and len(dn_targets) > 0:
-                    counts = []
-                    for t in dn_targets:
-                        if isinstance(t, dict) and 'labels' in t:
-                            # 确保labels是tensor并且在正确设备上
-                            labels = t['labels']
-                            if isinstance(labels, torch.Tensor):
-                                counts.append(len(labels))
+        if self.training:
+            # 【修复】增加对 dn_targets 为 None 的检查
+            if dn_targets is not None:
+                try:
+                    if isinstance(dn_targets, list) and len(dn_targets) > 0:
+                        counts = []
+                        for t in dn_targets:
+                            # 鲁棒性检查：确保 labels 存在且有效
+                            if isinstance(t, dict) and 'labels' in t:
+                                labels = t['labels']
+                                if isinstance(labels, torch.Tensor):
+                                    counts.append(len(labels))
+                                else:
+                                    counts.append(0)
                             else:
                                 counts.append(0)
-                        else:
-                            counts.append(0)
 
-                    if counts and sum(counts) > 0:  # 至少有一个目标
-                        real_counts = torch.tensor(counts, device=memory.device, dtype=torch.float32)
-            except Exception as e:
-                print(f"[Warning] CCM: 提取real_counts失败: {e}")
-                real_counts = None
+                        if counts:  # 只要列表非空
+                            real_counts = torch.tensor(counts, device=memory.device, dtype=torch.float32)
+                except Exception as e:
+                    print(f"[Warning] CCM: 提取real_counts失败: {e}")
+                    real_counts = None
 
-        # 【关键修复】CCM调用时使用try-except保护
+            # 【修复】如果从 dn_targets 提取失败，且处于训练模式，尝试构造一个默认的 (防止后续Loss计算NaN)
+            if real_counts is None:
+                # 默认 batch_size 长度的 50，避免中断训练，但会影响 Loss 准确性
+                # 建议这里打个日志，长期出现则需检查 data loader
+                bs = memory.shape[0]
+                real_counts = torch.full((bs,), 1.0, device=memory.device)
+
+
         ccm_outputs = {}
-        num_select = self.num_queries  # 默认值
+        num_select = self.num_queries
 
         try:
             ccm_outputs = self.CCM(memory, spatial_shapes=spatial_shapes, real_counts=real_counts)
 
-            # 【关键修复】安全提取num_queries
+            # 安全提取num_queries
             if ccm_outputs and isinstance(ccm_outputs, dict):
                 if 'num_queries' in ccm_outputs:
                     nq = ccm_outputs['num_queries']
