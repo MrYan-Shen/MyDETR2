@@ -720,16 +720,33 @@ class PostProcess(nn.Module):
         self.nms_iou_threshold = nms_iou_threshold
 
     @torch.no_grad()
-    def forward(self, outputs, target_sizes, target_num=300, not_to_xyxy=False, test=False):
+    def forward(self, outputs, target_sizes, target_num=None, not_to_xyxy=False, test=False):
         """ Perform the computation
         Parameters:
+            target_num:
             outputs: raw outputs of the model
             target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
+        # 统一处理num_select的类型
+        if target_num is None:
+            num_select = 300  # 默认值
+        elif isinstance(target_num, torch.Tensor):
+            # 如果是tensor，取最大值或第一个元素
+            if target_num.numel() > 1:
+                num_select = int(target_num.max().item())
+            else:
+                num_select = int(target_num.item())
+        elif isinstance(target_num, (int, float)):
+            num_select = int(target_num)
+        else:
+            print(f"[Warning] Unexpected target_num type: {type(target_num)}, using default 300")
+            num_select = 300
 
-        num_select = target_num
+        # 限制范围
+        num_select = max(100, min(num_select, 1500))
+
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
         assert len(out_logits) == len(target_sizes)
@@ -849,8 +866,9 @@ def build_dqdetr(args):
 
     # prepare weight dict
     # 5. 准备损失权重字典 (weight_dict)
-    weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
-    weight_dict['loss_giou'] = args.giou_loss_coef
+    weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef, 'loss_giou': args.giou_loss_coef,
+                   'loss_coverage': args.coverage_loss_coef, 'loss_interval': args.interval_loss_coef,
+                   'loss_spacing': args.spacing_loss_coef}
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
 
 
@@ -892,7 +910,11 @@ def build_dqdetr(args):
             interm_loss_coef = args.interm_loss_coef
         except:
             interm_loss_coef = 1.0
-        interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
+        interm_weight_dict.update({
+            k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k]
+            for k, v in clean_weight_dict_wo_dn.items()
+            if k in _coeff_weight_dict  # <--- 【关键修复】只处理在 _coeff_weight_dict 中存在的键
+        })
         weight_dict.update(interm_weight_dict)
 
     # 6. 定义要使用的损失列表

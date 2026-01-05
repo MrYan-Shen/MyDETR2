@@ -324,7 +324,7 @@ class DeformableTransformer(nn.Module):
         # 安全提取真实计数
         real_counts = None
         if self.training:
-            # 【修复】增加对 dn_targets 为 None 的检查
+            # 增加对 dn_targets 为 None 的检查
             if dn_targets is not None:
                 try:
                     if isinstance(dn_targets, list) and len(dn_targets) > 0:
@@ -346,7 +346,7 @@ class DeformableTransformer(nn.Module):
                     print(f"[Warning] CCM: 提取real_counts失败: {e}")
                     real_counts = None
 
-            # 【修复】如果从 dn_targets 提取失败，且处于训练模式，尝试构造一个默认的 (防止后续Loss计算NaN)
+            # 如果从 dn_targets 提取失败，且处于训练模式，尝试构造一个默认的 (防止后续Loss计算NaN)
             if real_counts is None:
                 # 默认 batch_size 长度的 50，避免中断训练，但会影响 Loss 准确性
                 # 建议这里打个日志，长期出现则需检查 data loader
@@ -362,10 +362,31 @@ class DeformableTransformer(nn.Module):
 
             # 安全提取num_queries
             if ccm_outputs and isinstance(ccm_outputs, dict):
+                if 'pred_boundaries' in ccm_outputs and 'log_boundaries' in ccm_outputs:
+                    boundaries = ccm_outputs['pred_boundaries']
+                    log_boundaries = ccm_outputs['log_boundaries']
+
+                    # 导入验证函数
+                    from util.box_ops import validate_boundary_predictions
+                    valid_mask = validate_boundary_predictions(boundaries, log_boundaries)
+
+                    # 如果有无效边界，记录警告
+                    if not valid_mask.all():
+                        invalid_count = (~valid_mask).sum().item()
+                        print(f"[Warning] CCM: 检测到 {invalid_count}/{len(valid_mask)} 个无效边界预测")
+
+                        # 对于无效的样本，使用默认查询数量
+                        if 'num_queries' in ccm_outputs:
+                            nq = ccm_outputs['num_queries']
+                            if isinstance(nq, torch.Tensor):
+                                # 将无效样本的num_queries设置为默认值
+                                nq[~valid_mask] = self.num_queries
+                                ccm_outputs['num_queries'] = nq
+
+                # 安全提取num_queries
                 if 'num_queries' in ccm_outputs:
                     nq = ccm_outputs['num_queries']
                     if isinstance(nq, torch.Tensor):
-                        # 如果是batch tensor，取最大值
                         num_select = int(nq.max().item()) if nq.numel() > 0 else self.num_queries
                     elif isinstance(nq, (int, float)):
                         num_select = int(nq)
@@ -373,20 +394,6 @@ class DeformableTransformer(nn.Module):
                 # 限制范围
                 max_queries = max(self.dynamic_query_list) if self.dynamic_query_list else 1500
                 num_select = max(300, min(num_select, max_queries))
-
-                # 【数值稳定性】检查边界预测的合理性
-                if 'pred_boundaries' in ccm_outputs:
-                    boundaries = ccm_outputs['pred_boundaries']
-                    log_boundaries = ccm_outputs['log_boundaries']
-
-                    # 使用box_ops验证
-                    from util.box_ops import validate_boundary_predictions
-                    valid_mask = validate_boundary_predictions(boundaries, log_boundaries)
-
-                    if not valid_mask.all():
-                        print(f"[Warning] CCM: 检测到无效边界，使用默认query数量")
-                        # 可以选择使用默认值或修正
-                        num_select = self.num_queries
 
         except Exception as e:
             print(f"[Error] CCM处理失败: {e}")

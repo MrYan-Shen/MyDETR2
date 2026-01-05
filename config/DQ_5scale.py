@@ -45,7 +45,7 @@ dim_feedforward = 2048  # Transformer中FFN层的隐藏维度
 hidden_dim = 256  # Transformer的特征维度
 dropout = 0.0  # Dropout率
 nheads = 8  # 多头注意力机制中的头数
-num_queries = 900  # **默认的查询数量**（在非动态模式下或作为初始值）
+num_queries = 1000  # 默认的查询数量（在非动态模式下或作为初始值）
 query_dim = 4
 num_patterns = 0
 pdetr3_bbox_embed_diff_each_layer = False
@@ -115,4 +115,9 @@ ema_decay = 0.9997
 ema_epoch = 0
 
 use_detached_boxes_dec_out = False
+
+
+coverage_loss_coef = 1.0  # 或 2.0
+interval_loss_coef = 1.0
+spacing_loss_coef = 1.0   # 或者是 count_loss_coef
 

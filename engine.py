@@ -31,10 +31,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # 初始化自适应边界损失函数
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
-        coverage_weight=20.0,
-        spacing_weight=1.0,
-        count_weight=1.0,
-        interval_weight=2.0
+        coverage_weight=0.5,
+        spacing_weight=2.0,
+        count_weight=0.1,
+        interval_weight=0.2,
+        boundary_guide_weight=1.0
     ).to(device)
     adaptive_criterion.train()
 
@@ -51,7 +52,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         samples = samples.to(device)
 
-        # 准备真实计数（在targets处理前提取）
+        # 准备真实计数
         real_counts = torch.tensor(
             [len(t['labels']) for t in targets],
             device=device,
@@ -71,16 +72,31 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
-            # 2. 计算自适应边界损失
+            # 2. 强制计算自适应边界损失
+            # 先初始化为0（防止后面忘记赋值）
             total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
+            loss_dict['loss_coverage'] = torch.tensor(0., device=device)
+            loss_dict['loss_interval'] = torch.tensor(0., device=device)
+            loss_dict['loss_count'] = torch.tensor(0., device=device)
+            loss_dict['loss_spacing'] = torch.tensor(0., device=device)
+            loss_dict['loss_boundary_guide'] = torch.tensor(0., device=device)
+            loss_dict['ccm_loss'] = torch.tensor(0., device=device)
 
-            # 检查CCM输出（outputs中直接包含CCM的key）
-            if 'pred_boundaries' in outputs:
+            # 检查CCM输出
+            has_ccm_output = False
+            if 'pred_boundaries' in outputs and 'log_boundaries' in outputs:
+                has_ccm_output = True
+
                 try:
                     # 构造adaptive_targets
                     adaptive_targets = {'real_counts': real_counts}
                     adaptive_loss_out = adaptive_criterion(outputs, adaptive_targets)
                     total_adaptive_loss = adaptive_loss_out['total_adaptive_loss']
+
+                    # 确保损失有梯度
+                    if not total_adaptive_loss.requires_grad:
+                        print(f"[ERROR] CCM loss没有梯度！")
+                        total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
                     # 累加到总损失
                     losses = losses + total_adaptive_loss
@@ -90,39 +106,93 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     loss_dict['loss_interval'] = adaptive_loss_out.get('loss_interval', torch.tensor(0., device=device))
                     loss_dict['loss_count'] = adaptive_loss_out.get('loss_count', torch.tensor(0., device=device))
                     loss_dict['loss_spacing'] = adaptive_loss_out.get('loss_spacing', torch.tensor(0., device=device))
+                    loss_dict['loss_boundary_guide'] = adaptive_loss_out.get('loss_boundary_guide', torch.tensor(0., device=device))
                     loss_dict['ccm_loss'] = total_adaptive_loss
 
-                    # 每100个iter记录边界值（用于监控）
+                    # 每100个iter记录边界值
                     if _cnt % 100 == 0 and args.rank == 0:
                         boundary_vals = adaptive_loss_out['boundary_vals'].cpu().tolist()
                         coverage_rates = adaptive_loss_out['coverage_rates'].cpu().tolist()
+
+                        loss_values = {
+                            'coverage': loss_dict['loss_coverage'].item(),
+                            'interval': loss_dict['loss_interval'].item(),
+                            'count': loss_dict['loss_count'].item(),
+                            'spacing': loss_dict['loss_spacing'].item(),
+                            'boundary_guide': loss_dict['loss_boundary_guide'].item(),
+                            'total_ccm': loss_dict['ccm_loss'].item()
+                        }
+
+                        # 计算边界相对误差
+                        target_boundaries = [10, 18, 30]
+                        boundary_errors = [
+                            abs(b - t) / t * 100 for b, t in zip(boundary_vals, target_boundaries)
+                        ]
+
+                        # 计算Coverage误差
+                        target_coverage = [0.40, 0.70, 0.90]
+                        coverage_errors = [
+                            abs(c - t) * 100 for c, t in zip(coverage_rates, target_coverage)
+                        ]
+
+                        monitor_msg = (
+                            f"\n{'=' * 70}\n"
+                            f"[CCM Monitor] Epoch {epoch}, Iter {_cnt}\n"
+                            f"  Boundaries: [{boundary_vals[0]:.1f}, {boundary_vals[1]:.1f}, {boundary_vals[2]:.1f}] px\n"
+                            f"  Errors:     [{boundary_errors[0]:.1f}%, {boundary_errors[1]:.1f}%, {boundary_errors[2]:.1f}%]\n"
+                            f"  Coverage:   [{coverage_rates[0]:.3f}, {coverage_rates[1]:.3f}, {coverage_rates[2]:.3f}]\n"
+                            f"  Errors:     [{coverage_errors[0]:.1f}%, {coverage_errors[1]:.1f}%, {coverage_errors[2]:.1f}%]\n"
+                            f"  Losses: CCM={loss_values['total_ccm']:.3f} "
+                            f"(Cov={loss_values['coverage']:.3f}, "
+                            f"Sp={loss_values['spacing']:.3f},"
+                            f"Guide={loss_values['boundary_guide']:.3f})\n"  
+                            f"  Total DETR Loss: {losses.item():.4f}\n"
+                            f"  CCM/DETR Ratio: {loss_values['total_ccm'] / losses.item() * 100:.1f}%\n"
+                            f"{'=' * 70}"
+                        )
+                        print(monitor_msg)
                         if logger:
-                            logger.info(
-                                f"Epoch {epoch}, Iter {_cnt}: Boundaries={boundary_vals}, Coverage={coverage_rates}")
+                            logger.info(monitor_msg)
 
                 except Exception as e:
                     if args.rank == 0:
-                        print(f"[Warning] 计算自适应损失失败: {e}")
-                    # 使用0损失
-                    loss_dict['loss_coverage'] = torch.tensor(0., device=device)
-                    loss_dict['loss_interval'] = torch.tensor(0., device=device)
-                    loss_dict['loss_count'] = torch.tensor(0., device=device)
-                    loss_dict['loss_spacing'] = torch.tensor(0., device=device)
-                    loss_dict['ccm_loss'] = torch.tensor(0., device=device)
-            else:
-                # 如果没有边界预测,使用0损失
-                loss_dict['loss_coverage'] = torch.tensor(0., device=device)
-                loss_dict['loss_interval'] = torch.tensor(0., device=device)
-                loss_dict['loss_count'] = torch.tensor(0., device=device)
-                loss_dict['loss_spacing'] = torch.tensor(0., device=device)
-                loss_dict['ccm_loss'] = torch.tensor(0., device=device)
+                        error_msg = f"[ERROR] 计算自适应损失失败 (Iter {_cnt}): {e}"
+                        print(error_msg)
+                        if logger:
+                            logger.error(error_msg)
+                        import traceback
+                        traceback.print_exc()
+
+                    # 失败时使用0损失
+                    total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
+
+            # 如果没有CCM输出，警告
+            if not has_ccm_output and _cnt % 100 == 0 and args.rank == 0:
+                print(f"[WARNING] Iter {_cnt}: 没有检测到CCM输出 (pred_boundaries)！")
 
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
                                       for k, v in loss_dict_reduced.items()}
+
+        # 确保CCM损失在weight_dict中
+        # 临时添加CCM损失的权重（如果不存在）
+        if 'ccm_loss' not in weight_dict:
+            weight_dict['ccm_loss'] = 1.0
+        if 'loss_coverage' not in weight_dict:
+            weight_dict['loss_coverage'] = 1.0
+        if 'loss_interval' not in weight_dict:
+            weight_dict['loss_interval'] = 1.0
+        if 'loss_count' not in weight_dict:
+            weight_dict['loss_count'] = 1.0
+        if 'loss_spacing' not in weight_dict:
+            weight_dict['loss_spacing'] = 1.0
+        if 'loss_boundary_guide' not in weight_dict:
+            weight_dict['loss_boundary_guide'] = 1.0
+
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+                                    for k, v in loss_dict_reduced.items()
+                                    if k in weight_dict}
 
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
         loss_value = losses_reduced_scaled.item()
@@ -242,7 +312,23 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             metric_logger.update(class_error=loss_dict_reduced['class_error'])
 
         # 提取num_select（处理不同输出格式）
-        num_select = outputs.get('num_select', None)
+        num_select = None
+        if 'num_select' in outputs:
+            ns = outputs['num_select']
+            if isinstance(ns, torch.Tensor):
+                if ns.numel() > 1:
+                    num_select = int(ns.max().item())
+                else:
+                    num_select = int(ns.item())
+            elif isinstance(ns, (int, float)):
+                num_select = int(ns)
+
+        # 如果没有num_select，使用默认值
+        if num_select is None:
+            num_select = 300
+
+        # 限制范围
+        num_select = max(100, min(num_select, 1500))
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes, num_select)
