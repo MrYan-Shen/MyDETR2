@@ -65,6 +65,8 @@ class DeformableTransformer(nn.Module):
 
                  dynamic_query_list=None,
                  ccm_cls_num=4,
+                 use_ema=True,
+                 ema_decay=0.9997
                  ):
         super().__init__()
         self.num_feature_levels = num_feature_levels
@@ -113,13 +115,15 @@ class DeformableTransformer(nn.Module):
 
         self.dynamic_query_list = dynamic_query_list
 
-        # 【关键修复1】使用完整的AdaptiveBoundaryCCM
+        # 使用完整的AdaptiveBoundaryCCM
         self.CCM = AdaptiveBoundaryCCM(
             feature_dim=256,
             ccm_cls_num=4,
             query_levels=dynamic_query_list,
             max_objects=1500,
-            use_soft_assignment=True
+            use_soft_assignment=True,
+            use_ema=use_ema,
+            ema_decay=ema_decay
         )
 
         self.CGFE = CGFE(gate_channels=256, reduction_ratio=16, num_feature_levels=self.num_feature_levels)
@@ -1170,5 +1174,7 @@ def build_deformable_transformer(args):
         use_detached_boxes_dec_out=use_detached_boxes_dec_out,
 
         dynamic_query_list=args.dynamic_query_list,
-        ccm_cls_num=args.ccm_cls_num
+        ccm_cls_num=args.ccm_cls_num,
+        use_ema=args.use_ema,
+        ema_decay=args.ema_decay
     )

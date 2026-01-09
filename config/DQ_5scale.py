@@ -9,7 +9,7 @@ lr_linear_proj_names = ['reference_points', 'sampling_offsets']  # 可变形注�
 lr_linear_proj_mult = 0.1  # 上述线性投影层学习率的乘数（lr * 0.1）
 ddetr_lr_param = False  # 是否使用Deformable DETR特定的学习率参数设置
 batch_size = 1  # 批处理大小。由于模型较大且输入图像大，batch_size设为1是常见选择。
-weight_decay = 0.0001  # L2权重衰减，用于防止过拟合
+weight_decay = 0.000001  # L2权重衰减，用于防止过拟合
 epochs = 1  # 训练总轮数
 lr_drop = 11  # 学习率下降的轮次（旧schedule）
 save_checkpoint_interval = 1  # 每隔多少epoch保存一次检查点
@@ -45,7 +45,7 @@ dim_feedforward = 2048  # Transformer中FFN层的隐藏维度
 hidden_dim = 256  # Transformer的特征维度
 dropout = 0.0  # Dropout率
 nheads = 8  # 多头注意力机制中的头数
-num_queries = 1000  # 默认的查询数量（在非动态模式下或作为初始值）
+num_queries = 900  # 默认的查询数量（在非动态模式下或作为初始值）
 query_dim = 4
 num_patterns = 0
 pdetr3_bbox_embed_diff_each_layer = False
@@ -110,14 +110,15 @@ dn_labelbook_size = 91
 match_unstable_error = True
 
 # for ema
-use_ema = False
+use_ema = True
 ema_decay = 0.9997
 ema_epoch = 0
+# 0.99 (当前): 太快，震荡严重。0.9997 (原计划): 标准值，适合从头训练。0.9999 (SOTA 推荐): 接近冻结
 
 use_detached_boxes_dec_out = False
 
 
-coverage_loss_coef = 1.0  # 或 2.0
+coverage_loss_coef = 1.0
 interval_loss_coef = 1.0
 spacing_loss_coef = 1.0   # 或者是 count_loss_coef
 

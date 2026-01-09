@@ -8,9 +8,8 @@ Fixed: EPSILON adjusted for tiny object normalized areas (e.g. 4x4 pixels).
 import torch
 from torch import Tensor
 from typing import Tuple, Optional
-import warnings
 
-# 【修改1】适应微小目标：4x4像素在800x800图上约为2.5e-5，必须小于此值
+# 适应微小目标：4x4像素在800x800图上约为2.5e-5，必须小于此值
 EPSILON = 1e-7
 
 
@@ -21,7 +20,7 @@ def box_cxcywh_to_xyxy(x: Tensor) -> Tensor:
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
     x_c, y_c, w, h = x.unbind(-1)
 
-    # 【修改2】限制最小宽高，防止除零。对于微小目标，1e-5 (约0.008像素) 足够安全
+    # 限制最小宽高，防止除零。对于微小目标，1e-5 (约0.008像素) 足够安全
     w = w.clamp(min=1e-5)
     h = h.clamp(min=1e-5)
 
@@ -45,7 +44,7 @@ def box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     """
     计算IoU，强制使用float32以保证微小目标精度
     """
-    # 【修改3】强制转换为 float32 进行计算，防止 FP16 下溢
+    # 强制转换为 float32 进行计算，防止 FP16 下溢
     # 这对微小目标 IoU 计算至关重要
     if boxes1.dtype == torch.float16:
         boxes1 = boxes1.float()
