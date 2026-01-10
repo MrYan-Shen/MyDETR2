@@ -30,20 +30,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # ============ 初始化自适应边界损失 ============
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
-        coverage_weight=0.5,  # 优化后权重
-        spacing_weight=1.0,
-        count_weight=0.2,
-        interval_weight=0.3,
-        boundary_guide_weight=2.0,
+        coverage_weight=0.3,  # 优化后权重
+        spacing_weight=1.5,
+        count_weight=0.15,
+        interval_weight=0.25,
+        boundary_guide_weight=1.2,
         enable_adaptive_targets=True,
         enable_loss_clipping=True
     ).to(device)
     adaptive_criterion.train()
 
-    # 动态CCM权重调度器
+    # 【新增】动态CCM权重调度器
     ccm_weight_scheduler = CCMWeightScheduler(
-        warmup_epochs=2,  # 前3个epoch warmup
-        peak_weight=1.5,  # 峰值权重
+        warmup_epochs=3,  # 前3个epoch warmup
+        peak_weight=1.0,  # 峰值权重
         final_weight=0.7,  # 最终权重 (避免过拟合)
         total_epochs=24
     )
@@ -71,7 +71,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        # 获取当前CCM权重
+        # 【新增】获取当前CCM权重
         current_ccm_weight = ccm_weight_scheduler.get_weight(epoch, _cnt)
 
         with torch.amp.autocast('cuda', enabled=args.amp):
@@ -106,14 +106,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     if not total_adaptive_loss.requires_grad:
                         print(f"[ERROR] CCM loss没有梯度!")
                         total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
-
-                    # 梯度缩放（防止CCM梯度爆炸）
-                    total_adaptive_loss = total_adaptive_loss * min(current_ccm_weight, 1.0)
-
-                    # 梯度裁剪感知
-                    if total_adaptive_loss > 10.0:
-                        print(f"[WARNING] CCM loss too high: {total_adaptive_loss.item():.2f}")
-                        total_adaptive_loss = torch.clamp(total_adaptive_loss, max=10.0)
 
                     # 应用动态权重
                     weighted_ccm_loss = total_adaptive_loss * current_ccm_weight
@@ -157,7 +149,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
                             monitor_msg = (
                                 f"\n{'=' * 60}\n"
-                                f"[CCM SOTA] E{epoch} Iter{_cnt} | Warmup:{warmup_factor:.2f} | Weight:{current_ccm_weight:.2f}\n"
+                                f"[CCM ] E{epoch} Iter{_cnt} | Warmup:{warmup_factor:.2f} | Weight:{current_ccm_weight:.2f}\n"
                                 f"  Batch: N∈[{count_stats['min']:.0f}, {count_stats['max']:.0f}], μ={count_stats['mean']:.1f}\n"
                                 f"  Boundaries: [{boundary_vals[0]:.1f}, {boundary_vals[1]:.1f}, {boundary_vals[2]:.1f}]px\n"
                                 f"  Targets:    [{adaptive_target_boundaries[0]:.1f}, {adaptive_target_boundaries[1]:.1f}, {adaptive_target_boundaries[2]:.1f}]px\n"
@@ -272,7 +264,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 class CCMWeightScheduler:
     """CCM损失动态权重调度器"""
 
-    def __init__(self, warmup_epochs=2, peak_weight=1.5, final_weight=0.7, total_epochs=24):
+    def __init__(self, warmup_epochs=3, peak_weight=1.0, final_weight=0.7, total_epochs=24):
         self.warmup_epochs = warmup_epochs
         self.peak_weight = peak_weight
         self.final_weight = final_weight
