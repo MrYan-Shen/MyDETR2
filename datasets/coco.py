@@ -703,7 +703,7 @@ def build(image_set, args):
     except:
         strong_aug = False
 
-    # 【核心修复】设置过滤标志，仅在训练集启用
+    # 设置过滤标志，仅在训练集启用
     filter_empty_gt = image_set in ['train', 'trainval']
 
     dataset = CocoDetection(img_folder, ann_file,
