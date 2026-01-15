@@ -10,18 +10,18 @@ lr_linear_proj_mult = 0.1  # 上述线性投影层学习率的乘数（lr * 0.1�
 ddetr_lr_param = False  # 是否使用Deformable DETR特定的学习率参数设置
 batch_size = 1  # 批处理大小。由于模型较大且输入图像大，batch_size设为1是常见选择。
 weight_decay = 0.0001  # L2权重衰减，用于防止过拟合
-epochs = 36  # 训练总轮数
+epochs = 1  # 训练总轮数
 lr_drop = 11  # 学习率下降的轮次（旧schedule）
 save_checkpoint_interval = 1  # 每隔多少epoch保存一次检查点
 clip_max_norm = 0.1  # 梯度裁剪的最大范数，用于稳定训练
 onecyclelr = False  # 是否使用OneCycle学习率调度器
 multi_step_lr = True  # 是否使用多步长学习率调度器
 lr_drop_list = [13, 23]  # 多步长调度器下，学习率下降的轮次列表
-val_epoch = [35]  # 指定在哪些轮次后进行验证
+val_epoch = [0]  # 指定在哪些轮次后进行验证
 # dataset_file='aitod_v2'
 
 # 分类阈值
-ccm_params = [10, 100, 500]
+ccm_params = [8, 16, 32]
 ccm_cls_num = 4
 dynamic_query_list = [300, 500, 900, 1500]
 find_unused_parameters = False
@@ -112,13 +112,15 @@ match_unstable_error = True
 # for ema
 use_ema = True
 ema_decay = 0.9997
-ema_epoch = 24
+ema_epoch = 0
 # 0.99 (当前): 太快，震荡严重。0.9997 (原计划): 标准值，适合从头训练。0.9999 (SOTA 推荐): 接近冻结
 
 use_detached_boxes_dec_out = False
 
 
-coverage_loss_coef = 1.0
-interval_loss_coef = 1.0
-spacing_loss_coef = 1.0   # 或者是 count_loss_coef
+coverage_loss_coef = 0.05
+interval_loss_coef = 0.05
+spacing_loss_coef = 1.0
+ccm_loss_coef = 0.5
+nwd_loss_coef = 1.0
 

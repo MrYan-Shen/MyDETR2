@@ -716,7 +716,7 @@ class AdaptiveBoundaryCCM(nn.Module):
         # max=2.5 (12.2px): 强制定义"极微小目标"上限，超过这个值就不叫 Very Tiny 了。
         # 这样模型仍然可以在 [4.5px, 12.2px] 之间自适应，但绝不会跑偏。
 
-        log_b1 = raw_out[:, 0].clamp(min=1.0, max=2.6)
+        log_b1 = raw_out[:, 0].clamp(min=1.0, max=3.0)
 
         min_log_gap = 0.5
         delta12 = F.softplus(raw_out[:, 1]) * warmup_factor + min_log_gap
@@ -726,7 +726,7 @@ class AdaptiveBoundaryCCM(nn.Module):
 
         # 同样对 b2 施加软约束，防止 Tiny 层过大
         # log(28px) ≈ 3.33. 限制 Tiny 层上限为 28px
-        log_b2 = log_b2.clamp(max=3.33)
+        log_b2 = log_b2.clamp(max=3.6)
 
         log_b3 = log_b2 + delta23
 
