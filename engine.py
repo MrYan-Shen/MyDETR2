@@ -121,7 +121,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     loss_dict['ccm_loss'] = weighted_ccm_loss
 
                     # ============ 改进版监控 (减少输出频率) ============
-                    if _cnt % 500 == 0 and args.rank == 0:  # 500iter一次,减少: 100 -> 500
+                    if _cnt % 1000 == 0 and args.rank == 0:
                         boundary_vals = adaptive_loss_out['boundary_vals'].cpu().tolist()
                         coverage_rates = adaptive_loss_out['coverage_rates'].cpu().tolist()
                         warmup_factor = outputs.get('warmup_factor', 1.0)
@@ -148,7 +148,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                             }
 
                             monitor_msg = (
-                                f"\n{'=' * 60}\n"
+                                f"\n{'=' * 30}\n"
                                 f"[CCM ] E{epoch} Iter{_cnt} | Warmup:{warmup_factor:.2f} | Weight:{current_ccm_weight:.2f}\n"
                                 f"  Batch: N∈[{count_stats['min']:.0f}, {count_stats['max']:.0f}], μ={count_stats['mean']:.1f}\n"
                                 f"  Boundaries: [{boundary_vals[0]:.1f}, {boundary_vals[1]:.1f}, {boundary_vals[2]:.1f}]px\n"
@@ -157,7 +157,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                 f"  Coverage:   [{coverage_rates[0]:.3f}, {coverage_rates[1]:.3f}, {coverage_rates[2]:.3f}]\n"
                                 f"  Losses: CCM={loss_values['total_ccm']:.3f} Cov={loss_values['coverage']:.3f} Guide={loss_values['boundary_guide']:.3f}\n"
                                 f"  DETR Loss: {losses.item():.4f} | CCM%: {loss_values['total_ccm'] / losses.item() * 100:.1f}%\n"
-                                f"{'=' * 60}"
+                                f"{'=' * 30}"
                             )
                         else:
                             monitor_msg = (
