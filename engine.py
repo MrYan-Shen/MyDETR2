@@ -28,23 +28,28 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     except:
         need_tgt_for_training = False
 
-    # ============ 初始化自适应边界损失 ============
+    # ============ 【SOTA 核心修改】初始化自适应边界损失 ============
+    # 这里的权重必须与 ccm.py 的新逻辑匹配：
+    # 1. 高 coverage_weight (0.8): 强迫模型"召回"微小目标
+    # 2. 低 spacing_weight (0.5): 允许边界自由浮动，不再强行推开
+    # 3. 低 boundary_guide_weight (0.5): 减少对人工先验的依赖
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
-        coverage_weight=0.3,  # 优化后权重
-        spacing_weight=1.5,
-        count_weight=0.15,
+        coverage_weight=0.8,   # 原 0.3 -> 0.8
+        spacing_weight=0.5,    # 原 1.5 -> 0.5
+        count_weight=0.2,      # 原 0.15 -> 0.2
         interval_weight=0.25,
-        boundary_guide_weight=1.2,
+        boundary_guide_weight=0.5, # 原 1.2 -> 0.5
         enable_adaptive_targets=True,
         enable_loss_clipping=True
     ).to(device)
     adaptive_criterion.train()
 
-    # 【新增】动态CCM权重调度器
+    # ============ 【SOTA 核心修改】动态CCM权重调度器 ============
+    # 延长 Warmup，降低峰值权重，让 Backbone 有时间适应微小特征
     ccm_weight_scheduler = CCMWeightScheduler(
-        warmup_epochs=3,  # 前3个epoch warmup
-        peak_weight=1.0,  # 峰值权重
-        final_weight=0.7,  # 最终权重 (避免过拟合)
+        warmup_epochs=5,  # 原 3 -> 5
+        peak_weight=0.8,  # 原 1.0 -> 0.8
+        final_weight=0.4,  # 原 0.7 -> 0.4
         total_epochs=24
     )
 
@@ -71,7 +76,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        # 【新增】获取当前CCM权重
+        # 获取当前CCM权重
         current_ccm_weight = ccm_weight_scheduler.get_weight(epoch, _cnt)
 
         with torch.amp.autocast('cuda', enabled=args.amp):
@@ -104,7 +109,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     total_adaptive_loss = adaptive_loss_out['total_adaptive_loss']
 
                     if not total_adaptive_loss.requires_grad:
-                        print(f"[ERROR] CCM loss没有梯度!")
                         total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
                     # 应用动态权重
@@ -120,7 +124,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                                                              torch.tensor(0., device=device))
                     loss_dict['ccm_loss'] = weighted_ccm_loss
 
-                    # ============ 改进版监控 (减少输出频率) ============
+                    # 改进版监控
                     if _cnt % 1000 == 0 and args.rank == 0:
                         boundary_vals = adaptive_loss_out['boundary_vals'].cpu().tolist()
                         coverage_rates = adaptive_loss_out['coverage_rates'].cpu().tolist()
@@ -134,10 +138,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
                         if 'adaptive_target_boundaries' in adaptive_loss_out:
                             adaptive_target_boundaries = adaptive_loss_out['adaptive_target_boundaries'].cpu().tolist()
-                            adaptive_target_coverage = adaptive_loss_out['adaptive_target_coverage'].cpu().tolist()
-
                             boundary_errors = [
-                                abs(b - t) / t * 100 for b, t in zip(boundary_vals, adaptive_target_boundaries)
+                                abs(b - t) / (t + 1e-6) * 100 for b, t in zip(boundary_vals, adaptive_target_boundaries)
                             ]
 
                             real_counts_cpu = real_counts.cpu().numpy()
@@ -156,53 +158,27 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                                 f"  Errors:     [{boundary_errors[0]:.1f}%, {boundary_errors[1]:.1f}%, {boundary_errors[2]:.1f}%]\n"
                                 f"  Coverage:   [{coverage_rates[0]:.3f}, {coverage_rates[1]:.3f}, {coverage_rates[2]:.3f}]\n"
                                 f"  Losses: CCM={loss_values['total_ccm']:.3f} Cov={loss_values['coverage']:.3f} Guide={loss_values['boundary_guide']:.3f}\n"
-                                f"  DETR Loss: {losses.item():.4f} | CCM%: {loss_values['total_ccm'] / losses.item() * 100:.1f}%\n"
+                                f"  DETR Loss: {losses.item():.4f}\n"
                                 f"{'=' * 30}"
                             )
-                        else:
-                            monitor_msg = (
-                                f"\n{'=' * 60}\n"
-                                f"[CCM] E{epoch} Iter{_cnt} | Warmup:{warmup_factor:.2f}\n"
-                                f"  Boundaries: [{boundary_vals[0]:.1f}, {boundary_vals[1]:.1f}, {boundary_vals[2]:.1f}]px\n"
-                                f"  Losses: CCM={loss_values['total_ccm']:.3f}\n"
-                                f"{'=' * 60}"
-                            )
-
-                        print(monitor_msg)
-                        if logger:
-                            logger.info(monitor_msg)
+                            print(monitor_msg)
+                            if logger: logger.info(monitor_msg)
 
                 except Exception as e:
                     if args.rank == 0:
-                        error_msg = f"[ERROR] CCM失败 (Iter {_cnt}): {e}"
-                        print(error_msg)
-                        if logger:
-                            logger.error(error_msg)
-                        import traceback
-                        traceback.print_exc()
-
+                        print(f"[ERROR] CCM失败 (Iter {_cnt}): {e}")
                     total_adaptive_loss = torch.tensor(0., device=device, requires_grad=True)
 
-            if not has_ccm_output and _cnt % 100 == 0 and args.rank == 0:
-                print(f"[WARNING] Iter {_cnt}: 没有CCM输出!")
-
-        # ============ 后续代码保持不变 ============
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
                                       for k, v in loss_dict_reduced.items()}
 
-        if 'ccm_loss' not in weight_dict:
-            weight_dict['ccm_loss'] = 1.0
-        if 'loss_coverage' not in weight_dict:
-            weight_dict['loss_coverage'] = 1.0
-        if 'loss_interval' not in weight_dict:
-            weight_dict['loss_interval'] = 1.0
-        if 'loss_count' not in weight_dict:
-            weight_dict['loss_count'] = 1.0
-        if 'loss_spacing' not in weight_dict:
-            weight_dict['loss_spacing'] = 1.0
-        if 'loss_boundary_guide' not in weight_dict:
-            weight_dict['loss_boundary_guide'] = 1.0
+        if 'ccm_loss' not in weight_dict: weight_dict['ccm_loss'] = 1.0
+        if 'loss_coverage' not in weight_dict: weight_dict['loss_coverage'] = 1.0
+        if 'loss_interval' not in weight_dict: weight_dict['loss_interval'] = 1.0
+        if 'loss_count' not in weight_dict: weight_dict['loss_count'] = 1.0
+        if 'loss_spacing' not in weight_dict: weight_dict['loss_spacing'] = 1.0
+        if 'loss_boundary_guide' not in weight_dict: weight_dict['loss_boundary_guide'] = 1.0
 
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items()
@@ -216,11 +192,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        # amp backward function
         if args.amp:
             optimizer.zero_grad()
             scaler.scale(losses).backward()
-
             if max_norm > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -239,7 +213,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if epoch >= args.ema_epoch:
                 ema_m.update(model)
 
-        # 更新日志
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(ccm_weight=current_ccm_weight)
         if 'class_error' in loss_dict_reduced:
@@ -260,10 +233,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         resstat.update({f'weight_{k}': v for k, v in criterion.weight_dict.items()})
     return resstat
 
-
 class CCMWeightScheduler:
-    """CCM损失动态权重调度器"""
-
     def __init__(self, warmup_epochs=3, peak_weight=1.0, final_weight=0.7, total_epochs=24):
         self.warmup_epochs = warmup_epochs
         self.peak_weight = peak_weight
@@ -271,20 +241,11 @@ class CCMWeightScheduler:
         self.total_epochs = total_epochs
 
     def get_weight(self, epoch: int, iteration: int) -> float:
-        """
-        获取当前CCM权重
-        - Epoch 0-2: 0 -> peak_weight (线性warmup)
-        - Epoch 3-18: peak_weight (稳定训练)
-        - Epoch 19-24: peak_weight -> final_weight (防过拟合)
-        """
         if epoch < self.warmup_epochs:
-            # Warmup阶段
             return self.peak_weight * (epoch + iteration / 14018) / self.warmup_epochs
         elif epoch < int(self.total_epochs * 0.75):
-            # 稳定阶段
             return self.peak_weight
         else:
-            # 衰减阶段
             decay_progress = (epoch - int(self.total_epochs * 0.75)) / (
                         self.total_epochs - int(self.total_epochs * 0.75))
             return self.peak_weight - (self.peak_weight - self.final_weight) * decay_progress

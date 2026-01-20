@@ -42,13 +42,7 @@ def generalized_box_iou(boxes1, boxes2):
 
 def box_nwd(boxes1, boxes2, constant=12.0):
     """
-    Normalized Wasserstein Distance (NWD) with Sqrt for linear gradient.
-    Args:
-        boxes1: [N, 4] (cx, cy, w, h)
-        boxes2: [M, 4] (cx, cy, w, h)
-        constant: Scaling factor.
-                  For normalized coords [0,1], typical tiny obj is 0.02-0.04.
-                  Set constant ~0.03.
+    Normalized Wasserstein Distance (NWD)
     """
     b1_cx, b1_cy, b1_w, b1_h = boxes1.unbind(-1)
     b2_cx, b2_cy, b2_w, b2_h = boxes2.unbind(-1)
@@ -61,7 +55,6 @@ def box_nwd(boxes1, boxes2, constant=12.0):
     pow_delta_h = (h1 / 2 - h2 / 2) ** 2
 
     wasserstein_2_sq = pow_delta_c + pow_delta_w + pow_delta_h
-    # 开根号，使得距离与尺度线性相关
     wasserstein_dist = torch.sqrt(wasserstein_2_sq.clamp(min=1e-7))
 
     nwd = torch.exp(-wasserstein_dist / constant)
@@ -84,10 +77,26 @@ def masks_to_boxes(masks):
     return torch.stack([x_min, y_min, x_max, y_max], 1)
 
 
-def validate_boundary_predictions(pred_boxes, image_size=None):
-    if torch.isnan(pred_boxes).any():
-        pred_boxes = torch.nan_to_num(pred_boxes, nan=0.0)
-    pred_boxes = pred_boxes.clamp(min=0.0)
-    if pred_boxes.shape[-1] == 4:
-        pred_boxes[..., 2:] = pred_boxes[..., 2:].clamp(min=1e-6)
-    return pred_boxes
+def validate_boundary_predictions(boundaries, log_boundaries):
+    """
+    验证边界预测的有效性
+    Args:
+        boundaries: [bs, 3]
+        log_boundaries: [bs, 3]
+    Returns:
+        valid_mask: [bs] boolean tensor, True表示该样本有效
+    """
+    if torch.isnan(boundaries).any() or torch.isnan(log_boundaries).any():
+        # 如果任何一个是NaN，标记为False
+        nan_check = ~(torch.isnan(boundaries).any(dim=1) | torch.isnan(log_boundaries).any(dim=1))
+    else:
+        nan_check = torch.ones(boundaries.shape[0], dtype=torch.bool, device=boundaries.device)
+
+    # 检查顺序 b1 < b2 < b3
+    # 允许一定的误差容忍 (1e-3)
+    order_check = (boundaries[:, 0] < boundaries[:, 1] + 1e-3) & (boundaries[:, 1] < boundaries[:, 2] + 1e-3)
+
+    # 检查范围 (0 < b < 10000)
+    range_check = (boundaries > 0).all(dim=1) & (boundaries < 10000).all(dim=1)
+
+    return nan_check & order_check & range_check

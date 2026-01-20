@@ -33,11 +33,12 @@ def make_ccm_layers(cfg, in_channels=256, d_rate=2):
 
 class AdaptiveBoundaryCCM(nn.Module):
     """
-    受限自适应边界 CCM (Constrained Adaptive Boundary)
+    SOTA改进版 CCM (针对 AI-TOD 微小目标优化)
 
-    核心改进:
-    1. 引入物理约束(Physical Constraints): 严格限制各层级的最大尺度，防止边界漂移。
-    2. 保留自适应特性: 在安全范围内允许模型动态微调。
+    修复日志:
+    1. 移除了 4.5px 的最小约束，允许边界下探到 1px (min=0.0)。
+    2. 提高了最大约束，防止在大密度场景下卡死在 13.5px。
+    3. 优化了 EMA 和初始化策略。
     """
 
     def __init__(self, feature_dim=256, ccm_cls_num=4, query_levels=[300, 500, 900, 1500],
@@ -84,8 +85,9 @@ class AdaptiveBoundaryCCM(nn.Module):
         self.ref_point_conv = nn.Conv2d(256, 1, kernel_size=1)
 
         if self.use_ema:
-            # 初始值设为 Epoch 13 的最佳实践值
-            self.register_buffer('ema_log_boundaries', torch.tensor([2.25, 2.89, 3.40]))
+            # 修正初始值: 针对 AI-TOD 调小初始边界
+            # [4.5px, 10.0px, 18.0px] -> log [1.5, 2.3, 2.9]
+            self.register_buffer('ema_log_boundaries', torch.tensor([1.5, 2.3, 2.9]))
             self.register_buffer('ema_initialized', torch.tensor(False))
             self.register_buffer('boundary_history', torch.zeros(100, 3))
             self.register_buffer('history_ptr', torch.tensor(0, dtype=torch.long))
@@ -100,12 +102,12 @@ class AdaptiveBoundaryCCM(nn.Module):
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
 
-        # 初始化为 Epoch 13 附近的最佳值: [9.5, 18.0, 30.0]
-        # log(9.5)≈2.25, log(18)≈2.89, log(30)≈3.40
+        # 针对微小目标重新初始化
         nn.init.normal_(self.boundary_head[-1].weight, std=0.0005)
-        nn.init.constant_(self.boundary_head[-1].bias[0], 2.25)  # 9.5px
-        nn.init.constant_(self.boundary_head[-1].bias[1], 0.64)  # delta1
-        nn.init.constant_(self.boundary_head[-1].bias[2], 0.51)  # delta2
+        # 初始化为更小的值: 4.5px (log 1.5)
+        nn.init.constant_(self.boundary_head[-1].bias[0], 1.5)
+        nn.init.constant_(self.boundary_head[-1].bias[1], 0.7)  # delta1
+        nn.init.constant_(self.boundary_head[-1].bias[2], 0.6)  # delta2
 
         nn.init.normal_(self.count_regressor[-1].weight, std=0.0005)
         nn.init.constant_(self.count_regressor[-1].bias, 3.5)
@@ -132,23 +134,16 @@ class AdaptiveBoundaryCCM(nn.Module):
 
         warmup_factor = self._get_warmup_factor()
 
-        # 【核心修改：物理约束】----------------------------------------------------
-        # 施加严格的物理约束，防止边界漂移到 14px (log 2.63) 以上。
-        # min=1.5 (4.5px): 保证不低于特征图最小分辨率
-        # max=2.5 (12.2px): 强制定义"极微小目标"上限，超过这个值就不叫 Very Tiny 了。
-        # 这样模型仍然可以在 [4.5px, 12.2px] 之间自适应，但绝不会跑偏。
+        # 【SOTA 修复】----------------------------------------------------
+        log_b1 = raw_out[:, 0].clamp(min=0.0, max=2.6)
 
-        log_b1 = raw_out[:, 0].clamp(min=1.5, max=2.6)
-
-        min_log_gap = 0.5
+        min_log_gap = 0.3  # 减小最小间距，允许层级更紧密
         delta12 = F.softplus(raw_out[:, 1]) * warmup_factor + min_log_gap
         delta23 = F.softplus(raw_out[:, 2]) * warmup_factor + min_log_gap
 
         log_b2 = log_b1 + delta12
-
-        # 同样对 b2 施加软约束，防止 Tiny 层过大
-        # log(28px) ≈ 3.33. 限制 Tiny 层上限为 28px
-        log_b2 = log_b2.clamp(max=3.5)
+        # log(33px) ≈ 3.5. 放宽 Tiny 层上限
+        log_b2 = log_b2.clamp(max=3.8)
 
         log_b3 = log_b2 + delta23
 
@@ -318,78 +313,66 @@ class TrueAdaptiveBoundaryLoss(nn.Module):
         self.enable_adaptive_targets = enable_adaptive_targets
         self.enable_loss_clipping = enable_loss_clipping
         self.smooth_l1 = nn.SmoothL1Loss()
+
+        # 修正：针对 AI-TOD 调低默认目标
         self.register_buffer('default_target_coverage',
                              torch.tensor([0.40, 0.70, 0.90]))
         self.register_buffer('default_target_boundaries_log',
-                             torch.tensor([2.30, 2.89, 3.40]))
+                             torch.tensor([1.8, 2.5, 3.0]))  # 6px, 12px, 20px
 
     def _compute_adaptive_targets(self, real_counts, device):
         bs = real_counts.shape[0]
-        small_b1 = torch.tensor(2.30, device=device)
-        small_b2 = torch.tensor(2.89, device=device)
-        small_b3 = torch.tensor(3.40, device=device)
-        medium_b1 = torch.tensor(2.71, device=device)
-        medium_b2 = torch.tensor(3.30, device=device)
-        medium_b3 = torch.tensor(3.91, device=device)
-        large_b1 = torch.tensor(3.22, device=device)
-        large_b2 = torch.tensor(3.91, device=device)
-        large_b3 = torch.tensor(4.61, device=device)
-        xlarge_b1 = torch.tensor(3.50, device=device)
-        xlarge_b2 = torch.tensor(4.20, device=device)
-        xlarge_b3 = torch.tensor(4.85, device=device)
+        # SOTA修正: 显著降低 Target 尺度，适应 Very Tiny Objects
+        small_b1 = torch.tensor(1.6, device=device)  # 5px
+        small_b2 = torch.tensor(2.3, device=device)
+        small_b3 = torch.tensor(2.9, device=device)
+
+        medium_b1 = torch.tensor(1.8, device=device)  # 6px
+        medium_b2 = torch.tensor(2.5, device=device)
+        medium_b3 = torch.tensor(3.1, device=device)
+
+        large_b1 = torch.tensor(2.1, device=device)  # 8px
+        large_b2 = torch.tensor(2.8, device=device)
+        large_b3 = torch.tensor(3.5, device=device)
+
+        xlarge_b1 = torch.tensor(2.4, device=device)  # 11px
+        xlarge_b2 = torch.tensor(3.0, device=device)
+        xlarge_b3 = torch.tensor(3.8, device=device)
+
         target_b1_log = torch.where(
-            real_counts < 30,
-            small_b1,
-            torch.where(real_counts < 80,
-                        medium_b1,
-                        torch.where(real_counts < 150,
-                                    large_b1,
-                                    xlarge_b1))
+            real_counts < 30, small_b1,
+            torch.where(real_counts < 80, medium_b1,
+                        torch.where(real_counts < 150, large_b1, xlarge_b1))
         )
         target_b2_log = torch.where(
-            real_counts < 30,
-            small_b2,
-            torch.where(real_counts < 80,
-                        medium_b2,
-                        torch.where(real_counts < 150,
-                                    large_b2,
-                                    xlarge_b2))
+            real_counts < 30, small_b2,
+            torch.where(real_counts < 80, medium_b2,
+                        torch.where(real_counts < 150, large_b2, xlarge_b2))
         )
         target_b3_log = torch.where(
-            real_counts < 30,
-            small_b3,
-            torch.where(real_counts < 80,
-                        medium_b3,
-                        torch.where(real_counts < 150,
-                                    large_b3,
-                                    xlarge_b3))
+            real_counts < 30, small_b3,
+            torch.where(real_counts < 80, medium_b3,
+                        torch.where(real_counts < 150, large_b3, xlarge_b3))
         )
         target_boundaries_log = torch.stack([target_b1_log, target_b2_log, target_b3_log], dim=1)
+
+        # 保持 Coverage 不变，因为这是比例
         target_cov1 = torch.where(
-            real_counts < 30,
-            torch.tensor(0.50, device=device),
-            torch.where(real_counts < 80,
-                        torch.tensor(0.40, device=device),
-                        torch.where(real_counts < 150,
-                                    torch.tensor(0.25, device=device),
+            real_counts < 30, torch.tensor(0.50, device=device),
+            torch.where(real_counts < 80, torch.tensor(0.40, device=device),
+                        torch.where(real_counts < 150, torch.tensor(0.25, device=device),
                                     torch.tensor(0.15, device=device)))
         )
         target_cov2 = torch.where(
-            real_counts < 30,
-            torch.tensor(0.75, device=device),
-            torch.where(real_counts < 80,
-                        torch.tensor(0.70, device=device),
-                        torch.where(real_counts < 150,
-                                    torch.tensor(0.55, device=device),
+            real_counts < 30, torch.tensor(0.75, device=device),
+            torch.where(real_counts < 80, torch.tensor(0.70, device=device),
+                        torch.where(real_counts < 150, torch.tensor(0.55, device=device),
                                     torch.tensor(0.40, device=device)))
         )
         target_cov3 = torch.where(
-            real_counts < 30,
-            torch.tensor(0.92, device=device),
-            torch.where(real_counts < 80,
-                        torch.tensor(0.90, device=device),
-                        torch.where(real_counts < 150,
-                                    torch.tensor(0.80, device=device),
+            real_counts < 30, torch.tensor(0.92, device=device),
+            torch.where(real_counts < 80, torch.tensor(0.90, device=device),
+                        torch.where(real_counts < 150, torch.tensor(0.80, device=device),
                                     torch.tensor(0.65, device=device)))
         )
         target_coverage = torch.stack([target_cov1, target_cov2, target_cov3], dim=1)
@@ -439,16 +422,18 @@ class TrueAdaptiveBoundaryLoss(nn.Module):
             log_b * sample_weights.unsqueeze(1),
             target_boundaries_log * sample_weights.unsqueeze(1)
         )
+
+        # 【SOTA 修复】：移除了对小边界的致命惩罚 (Relu(2.0 - log_b))
+        # 只保留相对间距约束，允许绝对值变小
         loss_spacing = (
-                F.relu(2.0 - log_b[:, 0]) * 3.0 +
-                F.relu(log_b[:, 0] - 2.71) * 3.0 +
-                F.relu(2.65 - log_b[:, 1]) * 2.0 +
-                F.relu(log_b[:, 1] - 3.22) * 2.0 +
-                F.relu(3.20 - log_b[:, 2]) * 2.0 +
-                F.relu(log_b[:, 2] - 3.81) * 2.0 +
-                F.relu(log_b[:, 0] + 0.47 - log_b[:, 1]) * 3.0 +
-                F.relu(log_b[:, 1] + 0.47 - log_b[:, 2]) * 3.0
+                F.relu(0.1 - log_b[:, 0]) * 5.0 +  # 仅防止 <= 1px
+                # 移除了 2.0 (7.4px) 的下限惩罚
+
+                # 相对间距
+                F.relu(log_b[:, 0] + 0.3 - log_b[:, 1]) * 3.0 +
+                F.relu(log_b[:, 1] + 0.3 - log_b[:, 2]) * 3.0
         ).mean()
+
         p0 = cdf_b1
         p1 = cdf_b2 - cdf_b1
         p2 = cdf_b3 - cdf_b2

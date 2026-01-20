@@ -641,7 +641,7 @@ def build_dqdetr(args):
     if hasattr(args, 'nwd_loss_coef'):
         weight_dict['loss_nwd'] = args.nwd_loss_coef
     else:
-        weight_dict['loss_nwd'] = 1.0
+        weight_dict['loss_nwd'] = 5.0
 
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
 

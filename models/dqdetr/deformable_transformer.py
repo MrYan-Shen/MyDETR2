@@ -122,8 +122,6 @@ class DeformableTransformer(nn.Module):
             query_levels=dynamic_query_list,
             max_objects=1500,
             use_soft_assignment=True,
-            use_ema=use_ema,
-            ema_decay=ema_decay
         )
 
         self.CGFE = CGFE(gate_channels=256, reduction_ratio=16, num_feature_levels=self.num_feature_levels)
