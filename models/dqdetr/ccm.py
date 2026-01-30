@@ -93,7 +93,7 @@ class AdaptiveBoundaryCCM(nn.Module):
             self.register_buffer('history_ptr', torch.tensor(0, dtype=torch.long))
 
         self.register_buffer('training_steps', torch.tensor(0, dtype=torch.long))
-        self.warmup_steps = 10000
+        self.warmup_steps = 5000
 
         self._init_weights()
 
@@ -134,8 +134,7 @@ class AdaptiveBoundaryCCM(nn.Module):
 
         warmup_factor = self._get_warmup_factor()
 
-        # 【SOTA 修复】----------------------------------------------------
-        log_b1 = raw_out[:, 0].clamp(min=0.0, max=2.6)
+        log_b1 = raw_out[:, 0].clamp(min=0.8, max=2.6)
 
         min_log_gap = 0.3  # 减小最小间距，允许层级更紧密
         delta12 = F.softplus(raw_out[:, 1]) * warmup_factor + min_log_gap
@@ -297,9 +296,9 @@ class AdaptiveBoundaryCCM(nn.Module):
 
 class TrueAdaptiveBoundaryLoss(nn.Module):
     def __init__(self,
-                 coverage_weight=0.3,
-                 spacing_weight=1.5,
-                 count_weight=0.15,
+                 coverage_weight=0.5,
+                 spacing_weight=1.0,
+                 count_weight=0.2,
                  interval_weight=0.25,
                  boundary_guide_weight=1.2,
                  enable_adaptive_targets=True,
@@ -426,10 +425,7 @@ class TrueAdaptiveBoundaryLoss(nn.Module):
         # 【SOTA 修复】：移除了对小边界的致命惩罚 (Relu(2.0 - log_b))
         # 只保留相对间距约束，允许绝对值变小
         loss_spacing = (
-                F.relu(0.1 - log_b[:, 0]) * 5.0 +  # 仅防止 <= 1px
-                # 移除了 2.0 (7.4px) 的下限惩罚
-
-                # 相对间距
+                F.relu(0.7 - log_b[:, 0]) * 3.0 +  # 保护底线：不让它小于 2px
                 F.relu(log_b[:, 0] + 0.3 - log_b[:, 1]) * 3.0 +
                 F.relu(log_b[:, 1] + 0.3 - log_b[:, 2]) * 3.0
         ).mean()
