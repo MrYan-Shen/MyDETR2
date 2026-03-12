@@ -268,6 +268,22 @@ def main(args):
         _tmp_st = OrderedDict(
             {k: v for k, v in utils.clean_state_dict(checkpoint).items() if check_keep(k, _ignorekeywordlist)})
 
+        # _load_output = model_without_ddp.load_state_dict(_tmp_st, strict=False)
+
+        # 1. 获取当前模型的 state_dict
+        current_model_dict = model_without_ddp.state_dict()
+
+        # 2. 查找形状不匹配的 key 并予以剔除
+        mismatched_keys = []
+        for k, v in _tmp_st.items():
+            if k in current_model_dict and v.shape != current_model_dict[k].shape:
+                print(f"⚠️ 跳过形状不匹配的参数: {k} | Checkpoint: {v.shape} -> Model: {current_model_dict[k].shape}")
+                mismatched_keys.append(k)
+
+        for k in mismatched_keys:
+            _tmp_st.pop(k)
+
+        # 3. 加载过滤后的 state_dict
         _load_output = model_without_ddp.load_state_dict(_tmp_st, strict=False)
         logger.info(str(_load_output))
 

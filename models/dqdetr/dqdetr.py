@@ -431,13 +431,13 @@ class SetCriterion(nn.Module):
             dn_pos_idx = []
             for i in range(len(targets)):
                 if len(targets[i]['labels']) > 0:
-                    t = torch.arange(0, len(targets[i]['labels']) - 1).long().cuda()
+                    t = torch.arange(0, len(targets[i]['labels']) - 1).long().to(device)
                     t = t.unsqueeze(0).repeat(scalar, 1)
                     tgt_idx = t.flatten()
-                    output_idx = (torch.tensor(range(scalar)) * single_pad).long().cuda().unsqueeze(1) + t
+                    output_idx = (torch.tensor(range(scalar)) * single_pad).long().to(device).unsqueeze(1) + t
                     output_idx = output_idx.flatten()
                 else:
-                    output_idx = tgt_idx = torch.tensor([]).long().cuda()
+                    output_idx = tgt_idx = torch.tensor([]).long().to(device)
                 dn_pos_idx.append((output_idx, tgt_idx))
 
             output_known_lbs_bboxes = dn_meta['output_known_lbs_bboxes']
@@ -453,7 +453,7 @@ class SetCriterion(nn.Module):
             l_dict = dict()
             for key in ['loss_bbox_dn', 'loss_giou_dn', 'loss_ce_dn', 'loss_xy_dn', 'loss_hw_dn',
                         'cardinality_error_dn', 'loss_nwd_dn']:
-                l_dict[key] = torch.as_tensor(0.).to('cuda')
+                l_dict[key] = torch.as_tensor(0.).to(device)
             losses.update(l_dict)
 
         for loss in self.losses:
@@ -487,7 +487,7 @@ class SetCriterion(nn.Module):
                     l_dict = dict()
                     for key in ['loss_bbox_dn', 'loss_giou_dn', 'loss_ce_dn', 'loss_xy_dn', 'loss_hw_dn',
                                 'cardinality_error_dn', 'loss_nwd_dn']:
-                        l_dict[key] = torch.as_tensor(0.).to('cuda')
+                        l_dict[key] = torch.as_tensor(0.).to(device)
                     l_dict = {k + f'_{idx}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 

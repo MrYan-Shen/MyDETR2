@@ -71,7 +71,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        # 【新增】获取当前CCM权重
+        # 获取当前CCM权重
         current_ccm_weight = ccm_weight_scheduler.get_weight(epoch, _cnt)
 
         with torch.amp.autocast('cuda', enabled=args.amp):
