@@ -191,6 +191,9 @@ class AdaptiveBoundaryCCM(nn.Module):
             soft_weights = self._compute_soft_weights(N_eval, log_boundaries_for_use)
             query_levels_tensor = torch.tensor(self.query_levels, dtype=torch.float32, device=device)
             num_queries = (soft_weights * query_levels_tensor).sum(dim=1).long()
+            # 新增：num_queries下限保护
+            min_queries = torch.tensor(500, device=device, dtype=torch.long)
+            num_queries = torch.max(num_queries, min_queries.expand_as(num_queries))
             level_indices = soft_weights.argmax(dim=1)
         else:
             level_indices = self._assign_query_levels(N_eval, boundaries)
@@ -201,8 +204,20 @@ class AdaptiveBoundaryCCM(nn.Module):
         heatmap = torch.sigmoid(self.ref_point_conv(density_feat).clamp(-10, 10))
         reference_points = self._generate_reference_points(heatmap, h, w, device)
 
+
         if self.training:
-            self.training_steps += 1
+            # 训练时保证至少level 1 (500 queries)，防止对稠密图漏检
+            # 但只针对real_counts较大的样本，不影响稀疏图
+            if real_counts is not None:
+                dense_mask = real_counts > 30  # 超过30个目标的图
+                if dense_mask.any():
+                    level_indices[dense_mask] = torch.max(
+                        level_indices[dense_mask],
+                        torch.ones_like(level_indices[dense_mask])  # 至少level 1
+                    )
+                    query_levels_tensor = torch.tensor(
+                        self.query_levels, device=device, dtype=torch.float32)
+                    num_queries = query_levels_tensor[level_indices].long()
 
         return {
             'pred_boundaries': boundaries,
@@ -357,22 +372,22 @@ class TrueAdaptiveBoundaryLoss(nn.Module):
 
         # 保持 Coverage 不变，因为这是比例
         target_cov1 = torch.where(
-            real_counts < 30, torch.tensor(0.50, device=device),
-            torch.where(real_counts < 80, torch.tensor(0.40, device=device),
-                        torch.where(real_counts < 150, torch.tensor(0.25, device=device),
-                                    torch.tensor(0.15, device=device)))
+            real_counts < 30, torch.tensor(0.55, device=device),  # 原0.50
+            torch.where(real_counts < 80, torch.tensor(0.45, device=device),  # 原0.40
+                        torch.where(real_counts < 150, torch.tensor(0.30, device=device),  # 原0.25
+                                    torch.tensor(0.20, device=device)))  # 原0.15
         )
         target_cov2 = torch.where(
-            real_counts < 30, torch.tensor(0.75, device=device),
-            torch.where(real_counts < 80, torch.tensor(0.70, device=device),
-                        torch.where(real_counts < 150, torch.tensor(0.55, device=device),
-                                    torch.tensor(0.40, device=device)))
+            real_counts < 30, torch.tensor(0.80, device=device),  # 原0.75
+            torch.where(real_counts < 80, torch.tensor(0.75, device=device),  # 原0.70
+                        torch.where(real_counts < 150, torch.tensor(0.60, device=device),  # 原0.55
+                                    torch.tensor(0.45, device=device)))  # 原0.40
         )
         target_cov3 = torch.where(
-            real_counts < 30, torch.tensor(0.92, device=device),
-            torch.where(real_counts < 80, torch.tensor(0.90, device=device),
-                        torch.where(real_counts < 150, torch.tensor(0.80, device=device),
-                                    torch.tensor(0.65, device=device)))
+            real_counts < 30, torch.tensor(0.95, device=device),  # 原0.92
+            torch.where(real_counts < 80, torch.tensor(0.93, device=device),  # 原0.90
+                        torch.where(real_counts < 150, torch.tensor(0.85, device=device),  # 原0.80
+                                    torch.tensor(0.70, device=device)))  # 原0.65
         )
         target_coverage = torch.stack([target_cov1, target_cov2, target_cov3], dim=1)
         return target_boundaries_log, target_coverage

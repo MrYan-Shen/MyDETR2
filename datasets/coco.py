@@ -348,42 +348,25 @@ dataset_hook_register = {
 }
 
 
-class CocoDetection(torchvision.datasets.CocoDetection):  # 通过索引构建数据集
-    def __init__(self, img_folder, ann_file, transforms, return_masks, aux_target_hacks=None, filter_empty_gt=False):
+class CocoDetection(torchvision.datasets.CocoDetection):
+    def __init__(self, img_folder, ann_file, transforms, return_masks,
+                 aux_target_hacks=None, filter_empty_gt=False,
+                 copy_paste=None):          # ← 新增参数
         super(CocoDetection, self).__init__(img_folder, ann_file)
-        self._transforms = transforms  # 存储了主要的数据增强变换（如缩放、裁剪、翻转等）
-        self.prepare = ConvertCocoPolysToMask(return_masks)  # 其核心功能是将 COCO 标注文件中的原始标注（尤其是边界框 bbox）转换为模型训练所需的格式
-        self.aux_target_hacks = aux_target_hacks  # 一个变换通道，包含一系列的自定义实例
-        self.filter_empty_gt = filter_empty_gt  # 新增：保存过滤标志
-
-    def change_hack_attr(self, hackclassname, attrkv_dict):
-        target_class = dataset_hook_register[hackclassname]
-        for item in self.aux_target_hacks:
-            if isinstance(item, target_class):
-                for k, v in attrkv_dict.items():
-                    setattr(item, k, v)
-
-    def get_hack(self, hackclassname):
-        target_class = dataset_hook_register[hackclassname]
-        for item in self.aux_target_hacks:
-            if isinstance(item, target_class):
-                return item
+        self._transforms = transforms
+        self.prepare = ConvertCocoPolysToMask(return_masks)
+        self.aux_target_hacks = aux_target_hacks
+        self.filter_empty_gt = filter_empty_gt
+        self.copy_paste = copy_paste        # ← 新增
 
     def __getitem__(self, idx):
-        """
-        Output:
-            - target: dict of multiple items
-                - boxes: Tensor[num_box, 4]. \
-                    Init type: x0,y0,x1,y1. unnormalized data.
-                    Final type: cx,cy,w,h. normalized data.
-        """
         try:
             img, target = super(CocoDetection, self).__getitem__(idx)
         except:
-            # 报错：idx
             print("Error idx: {}".format(idx))
             idx += 1
             img, target = super(CocoDetection, self).__getitem__(idx)
+
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
@@ -391,11 +374,14 @@ class CocoDetection(torchvision.datasets.CocoDetection):  # 通过索引构建�
         if self._transforms is not None:
             img, target = self._transforms(img, target)
 
-        # 【核心修复】如果是训练模式且没有目标框，则随机重试另一张图片
         if self.filter_empty_gt and len(target['boxes']) == 0:
             return self.__getitem__(random.randint(0, len(self) - 1))
 
-        # convert to needed format
+        # ★ 在 aux_target_hacks 之前执行 Copy-Paste
+        # 此时 img 是归一化后的 tensor，boxes 是 cxcywh normalized
+        if self.copy_paste is not None:
+            img, target = self.copy_paste(img, target)
+
         if self.aux_target_hacks is not None:
             for hack_runner in self.aux_target_hacks:
                 target, img = hack_runner(target, img=img)
@@ -703,6 +689,19 @@ def build(image_set, args):
     except:
         strong_aug = False
 
+    # 构建 Copy-Paste 增强器（只在训练集启用）
+    copy_paste = None
+    if image_set in ['train', 'trainval']:
+        from datasets.copy_paste import CopyPasteSmallObjects
+        copy_paste = CopyPasteSmallObjects(
+            p=0.5,
+            max_paste=6,
+            area_threshold=0.0016,  # 约对应 32x32 像素在 800px 图中
+            min_area=0.000025,
+            iou_threshold=0.15,
+            cache_size=300
+        )
+
     # 设置过滤标志，仅在训练集启用
     filter_empty_gt = image_set in ['train', 'trainval']
 
@@ -711,7 +710,8 @@ def build(image_set, args):
                                                             args=args),
                             return_masks=args.masks,
                             aux_target_hacks=aux_target_hacks_list,
-                            filter_empty_gt=filter_empty_gt  # 传入参数
+                            filter_empty_gt=filter_empty_gt,
+                            copy_paste=copy_paste,  # ← 新增传参
                             )
 
     return dataset

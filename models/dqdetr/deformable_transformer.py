@@ -395,7 +395,12 @@ class DeformableTransformer(nn.Module):
 
                 # 限制范围
                 max_queries = max(self.dynamic_query_list) if self.dynamic_query_list else 1500
-                num_select = max(300, min(num_select, max_queries))
+                # 推理时用更高的下限，训练时保持原逻辑
+                if self.training:
+                    num_select = max(300, min(num_select, max_queries))
+                else:
+                    # 推理时至少用 level 2 (900 queries)，保证 decoder 有足够候选
+                    num_select = max(900, min(num_select, max_queries))
 
         except Exception as e:
             print(f"[Error] CCM处理失败: {e}")

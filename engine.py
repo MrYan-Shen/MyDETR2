@@ -30,7 +30,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # ============ 初始化自适应边界损失 ============
     adaptive_criterion = TrueAdaptiveBoundaryLoss(
-        coverage_weight=0.5,  # 优化后权重
+        coverage_weight=0.5,
         spacing_weight=1.0,
         count_weight=0.2,
         interval_weight=0.25,
@@ -42,7 +42,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # 动态CCM权重调度器
     ccm_weight_scheduler = CCMWeightScheduler(
-        warmup_epochs=3,  # 前3个epoch warmup
+        warmup_epochs=3,  # 前3个epoch warmup //todo
         peak_weight=1.0,  # 峰值权重
         final_weight=0.7,  # 最终权重 (避免过拟合)
         total_epochs=24
@@ -263,7 +263,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 class CCMWeightScheduler:
     """CCM损失动态权重调度器"""
-
+    # todo
     def __init__(self, warmup_epochs=3, peak_weight=1.0, final_weight=0.7, total_epochs=24):
         self.warmup_epochs = warmup_epochs
         self.peak_weight = peak_weight
@@ -367,7 +367,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         if num_select is None:
             num_select = 300
 
-        num_select = max(100, min(num_select, 1500))
+        num_select = max(900, min(num_select, 1500))
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes, num_select)

@@ -549,7 +549,7 @@ class PostProcess(nn.Module):
             num_select = int(target_num)
         else:
             num_select = 300
-        num_select = max(100, min(num_select, 1500))
+        num_select = max(500, min(num_select, 1500))
 
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
         assert len(out_logits) == len(target_sizes)
